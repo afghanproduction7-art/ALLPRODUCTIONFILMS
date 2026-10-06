@@ -2,97 +2,101 @@ import asyncio
 import hashlib
 import hmac
 import json
+import time
+from pathlib import Path
 from urllib.parse import parse_qsl
 
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import (
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
+)
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from app.admin import get_statistics, is_admin
+from app.bot import bot, start_bot
 from app.config import settings
 from app.database import SessionLocal, init_db
-from app.models import User, Film, Channel
-from app.referrals import (
-    get_user,
-    get_or_create_user,
-    get_referral_count,
-    can_publish,
-    get_referral_leaders,
-)
 from app.films import (
-    get_film,
-    search_films,
     get_category_films,
+    get_film,
     get_official_films,
-    delete_film,
-    approve_film,
-    reject_film,
+    search_by_image_hash,
+    search_films,
 )
-from app.admin import (
-    is_admin,
-    get_statistics,
+from app.models import Film, User
+from app.referrals import (
+    ensure_referral_link,
+    get_referral_leaders,
+    get_referral_status,
 )
 from app.settings_db import (
-    seed_default_settings,
-    get_referral_target,
-    get_main_channel,
+    add_channel,
+    delete_channel,
     get_access_channel,
     get_auto_approve,
     get_channels,
-    add_channel,
-    update_channel,
-    delete_channel,
-    get_setting,
+    get_main_channel,
+    get_referral_target,
+    seed_default_settings,
     set_setting,
+    update_channel,
 )
 
-from app.bot import bot, start_bot
-
 
 # =========================================================
-# FASTAPI
+# APP
 # =========================================================
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 app = FastAPI(
     title="ALL PRODUCTION FILMS",
     version="1.0.0",
 )
 
-
-# =========================================================
-# STATIC FILES
-# =========================================================
-
 app.mount(
     "/static",
-    StaticFiles(directory="static"),
+    StaticFiles(
+        directory=str(BASE_DIR / "static")
+    ),
     name="static",
 )
 
 
 # =========================================================
-# FRONTEND
+# HOME / ADMIN
 # =========================================================
 
 @app.get("/")
 async def home():
-
     return FileResponse(
-        "static/index.html"
+        BASE_DIR / "static" / "index.html"
     )
 
 
 @app.get("/admin")
 async def admin_page():
-
     return FileResponse(
-        "static/admin.html"
+        BASE_DIR / "static" / "admin.html"
     )
 
 
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "project": "ALL PRODUCTION FILMS",
+    }
+
+
 # =========================================================
-# TELEGRAM INIT DATA VALIDATION
+# TELEGRAM WEB APP AUTH
 # =========================================================
 
 def validate_telegram_init_data(
@@ -100,135 +104,223 @@ def validate_telegram_init_data(
 ) -> dict:
 
     if not init_data:
-
         raise HTTPException(
             status_code=401,
-            detail="Missing Telegram initData",
+            detail="Telegram initData is required",
         )
 
     try:
-
         parsed = dict(
             parse_qsl(
                 init_data,
                 keep_blank_values=True,
             )
         )
-
-        received_hash = parsed.pop(
-            "hash",
-            None,
-        )
-
-        if not received_hash:
-
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid Telegram initData",
-            )
-
-        data_check_string = "\n".join(
-            f"{key}={value}"
-            for key, value in sorted(
-                parsed.items()
-            )
-        )
-
-        secret_key = hmac.new(
-            b"WebAppData",
-            settings.BOT_TOKEN.encode(),
-            hashlib.sha256,
-        ).digest()
-
-        calculated_hash = hmac.new(
-            secret_key,
-            data_check_string.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-
-        if not hmac.compare_digest(
-            calculated_hash,
-            received_hash,
-        ):
-
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid Telegram signature",
-            )
-
-        return parsed
-
-    except HTTPException:
-        raise
-
     except Exception:
-
         raise HTTPException(
             status_code=401,
-            detail="Invalid Telegram initData",
+            detail="Invalid initData",
         )
 
-
-# =========================================================
-# USER FROM INIT DATA
-# =========================================================
-
-def get_telegram_user(
-    init_data: str,
-):
-
-    data = validate_telegram_init_data(
-        init_data
+    received_hash = parsed.pop(
+        "hash",
+        None,
     )
 
-    user_json = data.get(
+    if not received_hash:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Telegram hash",
+        )
+
+    auth_date = parsed.get(
+        "auth_date"
+    )
+
+    if auth_date:
+
+        try:
+            auth_time = int(auth_date)
+
+            # 24-hour validity window
+            if (
+                abs(
+                    int(time.time())
+                    - auth_time
+                )
+                > 86400
+            ):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Telegram session expired",
+                )
+
+        except ValueError:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid auth_date",
+            )
+
+    data_check_string = "\n".join(
+        f"{key}={value}"
+        for key, value in sorted(
+            parsed.items()
+        )
+    )
+
+    secret_key = hmac.new(
+        b"WebAppData",
+        settings.BOT_TOKEN.encode(),
+        hashlib.sha256,
+    ).digest()
+
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(
+        calculated_hash,
+        received_hash,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Telegram authentication failed",
+        )
+
+    user_data = parsed.get(
         "user"
     )
 
-    if not user_json:
-
+    if not user_data:
         raise HTTPException(
             status_code=401,
-            detail="Telegram user not found",
+            detail="Telegram user missing",
         )
 
     try:
-
         return json.loads(
-            user_json
+            user_data
         )
-
-    except Exception:
-
+    except json.JSONDecodeError:
         raise HTTPException(
             status_code=401,
-            detail="Invalid Telegram user",
+            detail="Invalid Telegram user data",
         )
 
 
 # =========================================================
-# TELEGRAM ACCESS CHECK
+# CURRENT USER
+# =========================================================
+
+async def get_current_user(
+    init_data: str | None,
+):
+
+    if not init_data:
+        raise HTTPException(
+            status_code=401,
+            detail="Telegram authentication required",
+        )
+
+    telegram_user = (
+        validate_telegram_init_data(
+            init_data
+        )
+    )
+
+    telegram_id = int(
+        telegram_user["id"]
+    )
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(User).where(
+                User.telegram_id
+                == telegram_id
+            )
+        )
+
+        user = (
+            result.scalar_one_or_none()
+        )
+
+        if user is None:
+
+            user = User(
+                telegram_id=telegram_id,
+                username=telegram_user.get(
+                    "username"
+                ),
+                first_name=telegram_user.get(
+                    "first_name"
+                ),
+                referral_count=0,
+                can_publish=False,
+                is_blocked=False,
+            )
+
+            session.add(user)
+
+            await session.commit()
+
+            await session.refresh(
+                user
+            )
+
+        else:
+
+            user.username = (
+                telegram_user.get(
+                    "username"
+                )
+            )
+
+            user.first_name = (
+                telegram_user.get(
+                    "first_name"
+                )
+            )
+
+            await session.commit()
+
+        if user.is_blocked:
+
+            raise HTTPException(
+                status_code=403,
+                detail="USER_BLOCKED",
+            )
+
+        return user
+
+
+# =========================================================
+# ACCESS CHECK
 # =========================================================
 
 async def user_has_access(
     telegram_id: int,
-):
+) -> bool:
+
+    channel = (
+        await get_access_channel()
+    )
 
     try:
 
-        member = await bot.get_chat_member(
-            chat_id=await get_access_channel(),
-            user_id=telegram_id,
+        member = (
+            await bot.get_chat_member(
+                chat_id=channel,
+                user_id=telegram_id,
+            )
         )
 
-        status = str(
-            member.status
-        )
-
-        return status in {
-            "creator",
-            "administrator",
+        return member.status in {
             "member",
+            "administrator",
+            "creator",
             "restricted",
         }
 
@@ -237,42 +329,33 @@ async def user_has_access(
         return False
 
 
-# =========================================================
-# REQUIRE USER
-# =========================================================
-
 async def require_user(
-    init_data: str,
+    x_telegram_init_data: str | None,
 ):
 
-    tg_user = get_telegram_user(
-        init_data
+    user = await get_current_user(
+        x_telegram_init_data
     )
 
-    telegram_id = int(
-        tg_user["id"]
+    has_access = await user_has_access(
+        user.telegram_id
     )
 
-    if not await user_has_access(
-        telegram_id
-    ):
+    if not has_access:
+
+        access_channel = (
+            await get_access_channel()
+        )
 
         raise HTTPException(
             status_code=403,
-            detail="ACCESS_REQUIRED",
+            detail={
+                "code": "ACCESS_REQUIRED",
+                "channel": access_channel,
+            },
         )
 
-    await get_or_create_user(
-        telegram_id=telegram_id,
-        username=tg_user.get(
-            "username"
-        ),
-        first_name=tg_user.get(
-            "first_name"
-        ),
-    )
-
-    return telegram_id
+    return user
 
 
 # =========================================================
@@ -280,23 +363,30 @@ async def require_user(
 # =========================================================
 
 async def require_admin(
-    init_data: str,
+    x_telegram_init_data: str | None,
 ):
 
-    telegram_id = await require_user(
-        init_data
+    if not x_telegram_init_data:
+
+        raise HTTPException(
+            status_code=401,
+            detail="Telegram authentication required",
+        )
+
+    user = await get_current_user(
+        x_telegram_init_data
     )
 
     if not is_admin(
-        telegram_id
+        user.telegram_id
     ):
 
         raise HTTPException(
             status_code=403,
-            detail="ADMIN_REQUIRED",
+            detail="ADMIN_ONLY",
         )
 
-    return telegram_id
+    return user
 
 
 # =========================================================
@@ -307,6 +397,14 @@ def film_to_dict(
     film: Film,
 ):
 
+    poster_url = None
+
+    if film.poster_file_id:
+
+        poster_url = (
+            f"/api/films/{film.id}/poster"
+        )
+
     return {
         "id": film.id,
         "title": film.title,
@@ -316,11 +414,7 @@ def film_to_dict(
         "language": film.language,
         "description": film.description,
         "category": film.category,
-        "poster_url": (
-            f"/api/films/{film.id}/poster"
-            if film.poster_file_id
-            else None
-        ),
+        "poster_url": poster_url,
         "official": film.official,
         "approved": film.approved,
         "created_at": (
@@ -332,161 +426,142 @@ def film_to_dict(
 
 
 # =========================================================
-# BASIC API
-# =========================================================
-
-@app.get("/api/health")
-async def health():
-
-    return {
-        "status": "ok",
-        "project": "ALL PRODUCTION FILMS",
-        "database": "PostgreSQL",
-    }
-
-
-# =========================================================
-# CURRENT USER
+# USER API
 # =========================================================
 
 @app.get("/api/me")
 async def api_me(
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
 
-    telegram_id = await require_user(
+    user = await require_user(
         x_telegram_init_data
     )
 
-    user = await get_user(
-        telegram_id
+    referral = (
+        await get_referral_status(
+            user.telegram_id
+        )
     )
 
-    target = await get_referral_target()
+    referral_link = (
+        await ensure_referral_link(
+            user.telegram_id
+        )
+    )
 
     return {
-        "telegram_id": telegram_id,
-        "username": (
-            user.username
-            if user
-            else None
-        ),
-        "first_name": (
-            user.first_name
-            if user
-            else None
-        ),
-        "referral_count": (
-            user.referral_count
-            if user
-            else 0
-        ),
-        "referral_target": target,
-        "can_publish": (
-            user.can_publish
-            if user
-            else False
-        ),
-        "referral_link": (
-            user.referral_link
-            if user
-            else None
-        ),
+        "user": {
+            "telegram_id":
+                user.telegram_id,
+            "username":
+                user.username,
+            "first_name":
+                user.first_name,
+        },
+        "referral": {
+            **referral,
+            "referral_link":
+                referral_link,
+        },
+        "access": True,
     }
 
 
 # =========================================================
-# REFERRAL INFO
+# REFERRALS
 # =========================================================
 
 @app.get("/api/referrals")
 async def api_referrals(
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
 
-    telegram_id = await require_user(
+    user = await require_user(
         x_telegram_init_data
     )
 
-    user = await get_user(
-        telegram_id
+    status = (
+        await get_referral_status(
+            user.telegram_id
+        )
     )
 
-    target = await get_referral_target()
-
-    count = await get_referral_count(
-        telegram_id
+    link = (
+        await ensure_referral_link(
+            user.telegram_id
+        )
     )
 
     return {
-        "count": count,
-        "target": target,
-        "remaining": max(
-            target - count,
-            0,
-        ),
-        "can_publish": await can_publish(
-            telegram_id
-        ),
-        "referral_link": (
-            user.referral_link
-            if user
-            else None
-        ),
+        **status,
+        "referral_link": link,
+    }
+
+
+@app.get("/api/leaders")
+async def api_leaders(
+    x_telegram_init_data: str | None = Header(
+        default=None,
+        alias="X-Telegram-Init-Data",
+    ),
+):
+
+    await require_user(
+        x_telegram_init_data
+    )
+
+    leaders = (
+        await get_referral_leaders(
+            limit=50
+        )
+    )
+
+    return {
+        "leaders": [
+            {
+                "rank": index + 1,
+                "telegram_id":
+                    user.telegram_id,
+                "username":
+                    user.username,
+                "first_name":
+                    user.first_name,
+                "referral_count":
+                    user.referral_count,
+            }
+            for index, user
+            in enumerate(leaders)
+        ]
     }
 
 
 # =========================================================
-# REFERRAL LEADERS
-# =========================================================
-
-@app.get("/api/referrals/leaders")
-async def api_referral_leaders(
-    x_telegram_init_data: str = Header(
-        default="",
-        alias="X-Telegram-Init-Data",
-    ),
-):
-
-    await require_user(
-        x_telegram_init_data
-    )
-
-    leaders = await get_referral_leaders(
-        50
-    )
-
-    return [
-        {
-            "telegram_id": user.telegram_id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "referral_count": user.referral_count,
-        }
-        for user in leaders
-    ]
-
-
-# =========================================================
-# LATEST FILMS
+# FILMS
 # =========================================================
 
 @app.get("/api/films/latest")
-async def latest_films(
-    x_telegram_init_data: str = Header(
-        default="",
+async def api_latest_films(
+    limit: int = 30,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
 
     await require_user(
         x_telegram_init_data
+    )
+
+    limit = max(
+        1,
+        min(limit, 100),
     )
 
     async with SessionLocal() as session:
@@ -499,26 +574,25 @@ async def latest_films(
             .order_by(
                 Film.created_at.desc()
             )
-            .limit(50)
+            .limit(limit)
         )
 
         films = result.scalars().all()
 
-    return [
-        film_to_dict(film)
-        for film in films
-    ]
+    return {
+        "films": [
+            film_to_dict(film)
+            for film in films
+        ]
+    }
 
-
-# =========================================================
-# SEARCH FILMS
-# =========================================================
 
 @app.get("/api/films/search")
 async def api_search_films(
     q: str,
-    x_telegram_init_data: str = Header(
-        default="",
+    limit: int = 30,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -527,25 +601,30 @@ async def api_search_films(
         x_telegram_init_data
     )
 
-    films = await search_films(
-        q
+    limit = max(
+        1,
+        min(limit, 100),
     )
 
-    return [
-        film_to_dict(film)
-        for film in films
-    ]
+    films = await search_films(
+        q,
+        limit=limit,
+    )
 
+    return {
+        "films": [
+            film_to_dict(film)
+            for film in films
+        ]
+    }
 
-# =========================================================
-# CATEGORY
-# =========================================================
 
 @app.get("/api/films/category/{category}")
 async def api_category_films(
     category: str,
-    x_telegram_init_data: str = Header(
-        default="",
+    limit: int = 30,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -554,24 +633,31 @@ async def api_category_films(
         x_telegram_init_data
     )
 
-    films = await get_category_films(
-        category
+    limit = max(
+        1,
+        min(limit, 100),
     )
 
-    return [
-        film_to_dict(film)
-        for film in films
-    ]
+    films = (
+        await get_category_films(
+            category,
+            limit=limit,
+        )
+    )
 
+    return {
+        "films": [
+            film_to_dict(film)
+            for film in films
+        ]
+    }
 
-# =========================================================
-# OFFICIAL FILMS
-# =========================================================
 
 @app.get("/api/films/official")
 async def api_official_films(
-    x_telegram_init_data: str = Header(
-        default="",
+    limit: int = 30,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -580,23 +666,30 @@ async def api_official_films(
         x_telegram_init_data
     )
 
-    films = await get_official_films()
+    limit = max(
+        1,
+        min(limit, 100),
+    )
 
-    return [
-        film_to_dict(film)
-        for film in films
-    ]
+    films = (
+        await get_official_films(
+            limit=limit
+        )
+    )
 
+    return {
+        "films": [
+            film_to_dict(film)
+            for film in films
+        ]
+    }
 
-# =========================================================
-# FILM DETAILS
-# =========================================================
 
 @app.get("/api/films/{film_id}")
 async def api_film(
     film_id: int,
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -609,7 +702,7 @@ async def api_film(
         film_id
     )
 
-    if film is None:
+    if not film:
 
         raise HTTPException(
             status_code=404,
@@ -622,14 +715,166 @@ async def api_film(
 
 
 # =========================================================
-# FILM DOWNLOAD DEEP LINK
+# FILM POSTER
+# =========================================================
+
+@app.get("/api/films/{film_id}/poster")
+async def api_film_poster(
+    film_id: int,
+):
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(Film).where(
+                Film.id == film_id,
+                Film.approved.is_(True),
+            )
+        )
+
+        film = (
+            result.scalar_one_or_none()
+        )
+
+    if not film:
+        raise HTTPException(
+            status_code=404,
+            detail="Film not found",
+        )
+
+    if not film.poster_file_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Poster not found",
+        )
+
+    try:
+
+        telegram_file = (
+            await bot.get_file(
+                film.poster_file_id
+            )
+        )
+
+        if not telegram_file.file_path:
+            raise HTTPException(
+                status_code=404,
+                detail="Poster unavailable",
+            )
+
+        file_url = (
+            f"https://api.telegram.org/file/"
+            f"bot{settings.BOT_TOKEN}/"
+            f"{telegram_file.file_path}"
+        )
+
+        from fastapi.responses import RedirectResponse
+
+        return RedirectResponse(
+            file_url
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Poster unavailable",
+        )
+
+
+# =========================================================
+# IMAGE SEARCH
+# =========================================================
+
+@app.post("/api/films/search-image")
+async def api_search_by_image(
+    image: UploadFile = File(...),
+    limit: int = 20,
+    x_telegram_init_data: str | None = Header(
+        default=None,
+        alias="X-Telegram-Init-Data",
+    ),
+):
+
+    await require_user(
+        x_telegram_init_data
+    )
+
+    if not image.content_type:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid image",
+        )
+
+    if not image.content_type.startswith(
+        "image/"
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Only image files are allowed",
+        )
+
+    data = await image.read()
+
+    if not data:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Empty image",
+        )
+
+    if len(data) > 10 * 1024 * 1024:
+
+        raise HTTPException(
+            status_code=413,
+            detail="Image is too large",
+        )
+
+    try:
+
+        from app.films import (
+            calculate_image_hash,
+        )
+
+        image_hash = (
+            calculate_image_hash(
+                data
+            )
+        )
+
+    except Exception:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Could not process image",
+        )
+
+    films = await search_by_image_hash(
+        image_hash,
+        limit=limit,
+    )
+
+    return {
+        "films": [
+            film_to_dict(film)
+            for film in films
+        ]
+    }
+
+
+# =========================================================
+# DOWNLOAD / TELEGRAM DEEP LINK
 # =========================================================
 
 @app.get("/api/films/{film_id}/download")
 async def api_film_download(
     film_id: int,
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -642,82 +887,25 @@ async def api_film_download(
         film_id
     )
 
-    if film is None:
+    if not film:
 
         raise HTTPException(
             status_code=404,
             detail="Film not found",
         )
 
-    bot_username = (
+    username = (
         settings.BOT_USERNAME
         .lstrip("@")
     )
 
     return {
-        "url": (
-            f"https://t.me/"
-            f"{bot_username}"
-            f"?start=film_{film.id}"
-        )
+        "film_id": film.id,
+        "bot_username": username,
+        "deep_link":
+            f"https://t.me/{username}"
+            f"?start=film_{film.id}",
     }
-
-
-# =========================================================
-# POSTER
-# =========================================================
-
-@app.get("/api/films/{film_id}/poster")
-async def api_film_poster(
-    film_id: int,
-):
-
-    film = await get_film(
-        film_id
-    )
-
-    if film is None:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Film not found",
-        )
-
-    if not film.poster_file_id:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Poster not found",
-        )
-
-    try:
-
-        telegram_file = await bot.get_file(
-            film.poster_file_id
-        )
-
-        from io import BytesIO
-
-        buffer = BytesIO()
-
-        await bot.download_file(
-            telegram_file.file_path,
-            buffer,
-        )
-
-        buffer.seek(0)
-
-        return StreamingResponse(
-            buffer,
-            media_type="image/jpeg",
-        )
-
-    except Exception:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Unable to load poster",
-        )
 
 
 # =========================================================
@@ -726,8 +914,8 @@ async def api_film_poster(
 
 @app.get("/api/channels")
 async def api_channels(
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -740,26 +928,31 @@ async def api_channels(
         active_only=True
     )
 
-    return [
-        {
-            "id": channel.id,
-            "title": channel.title,
-            "username": channel.username,
-            "category": channel.category,
-            "active": channel.active,
-        }
-        for channel in channels
-    ]
+    return {
+        "channels": [
+            {
+                "id": channel.id,
+                "title": channel.title,
+                "username":
+                    channel.username,
+                "category":
+                    channel.category,
+                "active":
+                    channel.active,
+            }
+            for channel in channels
+        ]
+    }
 
 
 # =========================================================
-# ADMIN STATISTICS
+# ADMIN - STATS
 # =========================================================
 
 @app.get("/api/admin/stats")
 async def api_admin_stats(
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -768,42 +961,17 @@ async def api_admin_stats(
         x_telegram_init_data
     )
 
-    stats = await get_statistics()
-
-    target = await get_referral_target()
-
-    auto_approve = await get_auto_approve()
-
-    return {
-        **stats,
-        "referral_target": target,
-        "auto_approve_films": auto_approve,
-    }
+    return await get_statistics()
 
 
 # =========================================================
-# ADMIN SETTINGS MODEL
-# =========================================================
-
-class AdminSettingsUpdate(BaseModel):
-
-    referral_target: int | None = None
-
-    auto_approve_films: bool | None = None
-
-    main_channel: str | None = None
-
-    access_channel: str | None = None
-
-
-# =========================================================
-# GET ADMIN SETTINGS
+# ADMIN - SETTINGS
 # =========================================================
 
 @app.get("/api/admin/settings")
 async def api_admin_settings(
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -815,38 +983,39 @@ async def api_admin_settings(
     return {
         "referral_target":
             await get_referral_target(),
-
-        "auto_approve_films":
-            await get_auto_approve(),
-
         "main_channel":
             await get_main_channel(),
-
         "access_channel":
             await get_access_channel(),
+        "auto_approve":
+            await get_auto_approve(),
     }
 
 
-# =========================================================
-# UPDATE ADMIN SETTINGS
-# =========================================================
+class SettingsUpdate(BaseModel):
 
-@app.post("/api/admin/settings")
-async def api_update_admin_settings(
-    data: AdminSettingsUpdate,
-    x_telegram_init_data: str = Header(
-        default="",
+    referral_target: int | None = None
+    main_channel: str | None = None
+    access_channel: str | None = None
+    auto_approve: bool | None = None
+
+
+@app.put("/api/admin/settings")
+async def api_update_settings(
+    payload: SettingsUpdate,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
 
-    admin_id = await require_admin(
+    admin = await require_admin(
         x_telegram_init_data
     )
 
-    if data.referral_target is not None:
+    if payload.referral_target is not None:
 
-        if data.referral_target < 1:
+        if payload.referral_target < 1:
 
             raise HTTPException(
                 status_code=400,
@@ -855,54 +1024,64 @@ async def api_update_admin_settings(
 
         await set_setting(
             "referral_target",
-            str(data.referral_target),
+            str(
+                payload.referral_target
+            ),
         )
 
-    if data.auto_approve_films is not None:
+    if payload.main_channel:
+
+        await set_setting(
+            "main_channel",
+            payload.main_channel.strip(),
+        )
+
+    if payload.access_channel:
+
+        await set_setting(
+            "access_channel",
+            payload.access_channel.strip(),
+        )
+
+    if payload.auto_approve is not None:
 
         await set_setting(
             "auto_approve_films",
             str(
-                data.auto_approve_films
+                payload.auto_approve
             ).lower(),
-        )
-
-    if data.main_channel is not None:
-
-        await set_setting(
-            "main_channel",
-            data.main_channel.strip(),
-        )
-
-    if data.access_channel is not None:
-
-        await set_setting(
-            "access_channel",
-            data.access_channel.strip(),
         )
 
     return {
         "success": True,
-        "admin_id": admin_id,
-        "referral_target":
-            await get_referral_target(),
-        "auto_approve_films":
-            await get_auto_approve(),
-        "main_channel":
-            await get_main_channel(),
-        "access_channel":
-            await get_access_channel(),
+        "admin_id":
+            admin.telegram_id,
     }
 
 
 # =========================================================
-# ADMIN CHANNELS
+# ADMIN - CHANNELS
 # =========================================================
+
+class ChannelCreate(BaseModel):
+
+    title: str
+    username: str
+    category: str = "general"
+
+
+class ChannelUpdate(BaseModel):
+
+    title: str | None = None
+    username: str | None = None
+    category: str | None = None
+    active: bool | None = None
+
 
 @app.get("/api/admin/channels")
 async def api_admin_channels(
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -915,40 +1094,29 @@ async def api_admin_channels(
         active_only=False
     )
 
-    return [
-        {
-            "id": channel.id,
-            "title": channel.title,
-            "username": channel.username,
-            "category": channel.category,
-            "active": channel.active,
-        }
-        for channel in channels
-    ]
+    return {
+        "channels": [
+            {
+                "id": channel.id,
+                "title":
+                    channel.title,
+                "username":
+                    channel.username,
+                "category":
+                    channel.category,
+                "active":
+                    channel.active,
+            }
+            for channel in channels
+        ]
+    }
 
-
-# =========================================================
-# ADD CHANNEL MODEL
-# =========================================================
-
-class ChannelCreate(BaseModel):
-
-    title: str
-
-    username: str
-
-    category: str = "pashto"
-
-
-# =========================================================
-# ADD CHANNEL
-# =========================================================
 
 @app.post("/api/admin/channels")
 async def api_add_channel(
-    data: ChannelCreate,
-    x_telegram_init_data: str = Header(
-        default="",
+    payload: ChannelCreate,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -957,10 +1125,19 @@ async def api_add_channel(
         x_telegram_init_data
     )
 
+    username = payload.username.strip()
+
+    if not username.startswith("@"):
+
+        username = (
+            "@"
+            + username
+        )
+
     channel = await add_channel(
-        title=data.title,
-        username=data.username,
-        category=data.category,
+        title=payload.title.strip(),
+        username=username,
+        category=payload.category.strip(),
     )
 
     return {
@@ -975,31 +1152,12 @@ async def api_add_channel(
     }
 
 
-# =========================================================
-# UPDATE CHANNEL MODEL
-# =========================================================
-
-class ChannelUpdate(BaseModel):
-
-    title: str | None = None
-
-    username: str | None = None
-
-    category: str | None = None
-
-    active: bool | None = None
-
-
-# =========================================================
-# UPDATE CHANNEL
-# =========================================================
-
 @app.put("/api/admin/channels/{channel_id}")
 async def api_update_channel(
     channel_id: int,
-    data: ChannelUpdate,
-    x_telegram_init_data: str = Header(
-        default="",
+    payload: ChannelUpdate,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -1010,13 +1168,13 @@ async def api_update_channel(
 
     channel = await update_channel(
         channel_id=channel_id,
-        title=data.title,
-        username=data.username,
-        category=data.category,
-        active=data.active,
+        title=payload.title,
+        username=payload.username,
+        category=payload.category,
+        active=payload.active,
     )
 
-    if channel is None:
+    if not channel:
 
         raise HTTPException(
             status_code=404,
@@ -1035,15 +1193,11 @@ async def api_update_channel(
     }
 
 
-# =========================================================
-# DELETE CHANNEL
-# =========================================================
-
 @app.delete("/api/admin/channels/{channel_id}")
 async def api_delete_channel(
     channel_id: int,
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -1069,19 +1223,25 @@ async def api_delete_channel(
 
 
 # =========================================================
-# ADMIN FILMS
+# ADMIN - FILMS
 # =========================================================
 
 @app.get("/api/admin/films")
 async def api_admin_films(
-    x_telegram_init_data: str = Header(
-        default="",
+    limit: int = 100,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
 
     await require_admin(
         x_telegram_init_data
+    )
+
+    limit = max(
+        1,
+        min(limit, 200),
     )
 
     async with SessionLocal() as session:
@@ -1091,26 +1251,30 @@ async def api_admin_films(
             .order_by(
                 Film.created_at.desc()
             )
-            .limit(200)
+            .limit(limit)
         )
 
         films = result.scalars().all()
 
-    return [
-        film_to_dict(film)
-        for film in films
-    ]
+    return {
+        "films": [
+            film_to_dict(film)
+            for film in films
+        ]
+    }
 
 
 # =========================================================
-# APPROVE FILM
+# ADMIN - FILM ACTIONS
 # =========================================================
 
-@app.post("/api/admin/films/{film_id}/approve")
+@app.post(
+    "/api/admin/films/{film_id}/approve"
+)
 async def api_approve_film(
     film_id: int,
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -1119,11 +1283,13 @@ async def api_approve_film(
         x_telegram_init_data
     )
 
-    success = await approve_film(
+    from app.films import approve_film
+
+    film = await approve_film(
         film_id
     )
 
-    if not success:
+    if not film:
 
         raise HTTPException(
             status_code=404,
@@ -1131,19 +1297,20 @@ async def api_approve_film(
         )
 
     return {
-        "success": True
+        "success": True,
+        "film": film_to_dict(
+            film
+        ),
     }
 
 
-# =========================================================
-# REJECT FILM
-# =========================================================
-
-@app.post("/api/admin/films/{film_id}/reject")
+@app.post(
+    "/api/admin/films/{film_id}/reject"
+)
 async def api_reject_film(
     film_id: int,
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -1152,11 +1319,13 @@ async def api_reject_film(
         x_telegram_init_data
     )
 
-    success = await reject_film(
+    from app.films import reject_film
+
+    film = await reject_film(
         film_id
     )
 
-    if not success:
+    if not film:
 
         raise HTTPException(
             status_code=404,
@@ -1168,15 +1337,13 @@ async def api_reject_film(
     }
 
 
-# =========================================================
-# DELETE FILM
-# =========================================================
-
-@app.delete("/api/admin/films/{film_id}")
+@app.delete(
+    "/api/admin/films/{film_id}"
+)
 async def api_delete_film(
     film_id: int,
-    x_telegram_init_data: str = Header(
-        default="",
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -1185,11 +1352,13 @@ async def api_delete_film(
         x_telegram_init_data
     )
 
-    success = await delete_film(
+    from app.films import delete_film
+
+    deleted = await delete_film(
         film_id
     )
 
-    if not success:
+    if not deleted:
 
         raise HTTPException(
             status_code=404,
@@ -1201,21 +1370,19 @@ async def api_delete_film(
     }
 
 
-# =========================================================
-# SET OFFICIAL FILM
-# =========================================================
-
-class OfficialFilmUpdate(BaseModel):
+class OfficialUpdate(BaseModel):
 
     official: bool
 
 
-@app.post("/api/admin/films/{film_id}/official")
-async def api_set_official(
+@app.put(
+    "/api/admin/films/{film_id}/official"
+)
+async def api_update_official(
     film_id: int,
-    data: OfficialFilmUpdate,
-    x_telegram_init_data: str = Header(
-        default="",
+    payload: OfficialUpdate,
+    x_telegram_init_data: str | None = Header(
+        default=None,
         alias="X-Telegram-Init-Data",
     ),
 ):
@@ -1232,22 +1399,32 @@ async def api_set_official(
             )
         )
 
-        film = result.scalar_one_or_none()
+        film = (
+            result.scalar_one_or_none()
+        )
 
-        if film is None:
+        if not film:
 
             raise HTTPException(
                 status_code=404,
                 detail="Film not found",
             )
 
-        film.official = data.official
+        film.official = (
+            payload.official
+        )
 
         await session.commit()
 
+        await session.refresh(
+            film
+        )
+
     return {
         "success": True,
-        "official": data.official,
+        "film": film_to_dict(
+            film
+        ),
     }
 
 
@@ -1258,39 +1435,50 @@ async def api_set_official(
 @app.on_event("startup")
 async def startup_event():
 
-    # Create PostgreSQL tables
     await init_db()
 
-    # Create default settings/channels
     await seed_default_settings()
 
-    # Seed default channels
+    # Default channels are inserted only if
+    # they don't already exist.
+    default_channels = [
+        (
+            "Afghan Production",
+            "@afghanproduction",
+            "general",
+        ),
+        (
+            "ALL PASHTO DUBBED",
+            "@ALL_PASHTO_DUBBED",
+            "dubbed",
+        ),
+        (
+            "PASHTO SUB",
+            "@PASHTO_SUB",
+            "subtitle",
+        ),
+    ]
+
     async with SessionLocal() as session:
 
-        default_channels = [
-            {
-                "title": "Afghan Production",
-                "username": "@afghanproduction",
-                "category": "pashto",
-            },
-            {
-                "title": "ALL PASHTO DUBBED",
-                "username": "@ALL_PASHTO_DUBBED",
-                "category": "pashto",
-            },
-            {
-                "title": "PASHTO SUB",
-                "username": "@PASHTO_SUB",
-                "category": "pashto",
-            },
-        ]
-
-        for item in default_channels:
+        for title, username, category in default_channels:
 
             result = await session.execute(
-                select(Channel).where(
-                    Channel.username
-                    == item["username"]
+                select(
+                    __import__(
+                        "app.models",
+                        fromlist=[
+                            "Channel"
+                        ],
+                    ).Channel
+                ).where(
+                    __import__(
+                        "app.models",
+                        fromlist=[
+                            "Channel"
+                        ],
+                    ).Channel.username
+                    == username
                 )
             )
 
@@ -1300,11 +1488,18 @@ async def startup_event():
 
             if existing is None:
 
+                ChannelModel = __import__(
+                    "app.models",
+                    fromlist=[
+                        "Channel"
+                    ],
+                ).Channel
+
                 session.add(
-                    Channel(
-                        title=item["title"],
-                        username=item["username"],
-                        category=item["category"],
+                    ChannelModel(
+                        title=title,
+                        username=username,
+                        category=category,
                         active=True,
                     )
                 )
@@ -1325,9 +1520,6 @@ async def startup_event():
 async def shutdown_event():
 
     try:
-
         await bot.session.close()
-
     except Exception:
-
         pass
