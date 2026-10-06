@@ -1,585 +1,1261 @@
-const tg = window.Telegram?.WebApp;
+const tg = window.Telegram.WebApp;
 
-if (tg) {
-    tg.ready();
-    tg.expand();
-}
+tg.ready();
+tg.expand();
 
+const initData = tg.initData || "";
 
-const results = document.getElementById("results");
-const loading = document.getElementById("loading");
-const empty = document.getElementById("empty");
-const sectionTitle = document.getElementById("sectionTitle");
-const modal = document.getElementById("modal");
-const modalBody = document.getElementById("modalBody");
+const headers = {
+    "X-Telegram-Init-Data": initData,
+    "Content-Type": "application/json"
+};
 
 
-function showLoading() {
-    loading.classList.remove("hidden");
-    empty.classList.add("hidden");
-    results.innerHTML = "";
-}
+// =========================================================
+// API
+// =========================================================
 
-
-function hideLoading() {
-    loading.classList.add("hidden");
-}
-
-
-function escapeHtml(text) {
-
-    if (!text) {
-        return "";
-    }
-
-    return String(text)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-}
-
-
-function renderFilms(films) {
-
-    hideLoading();
-
-    results.innerHTML = "";
-
-    if (!films || films.length === 0) {
-
-        empty.classList.remove("hidden");
-
-        return;
-    }
-
-    empty.classList.add("hidden");
-
-
-    films.forEach(film => {
-
-        const card = document.createElement("div");
-
-        card.className = "film-card";
-
-
-        const poster = film.poster_file_id
-            ? `<div class="poster-placeholder">🎬</div>`
-            : `<div class="poster-placeholder">🎬</div>`;
-
-
-        card.innerHTML = `
-
-            ${poster}
-
-            <div class="film-info">
-
-                <h3>
-                    ${escapeHtml(film.title)}
-                </h3>
-
-                <p>
-                    📅 ${escapeHtml(film.year || "—")}
-                </p>
-
-                <p>
-                    ⚙️ ${escapeHtml(film.quality || "—")}
-                </p>
-
-                <button
-                    onclick="openFilm(${film.id})"
-                >
-                    ▶️ فلم وګوره
-                </button>
-
-            </div>
-
-        `;
-
-
-        results.appendChild(card);
-
-    });
-}
-
-
-async function apiRequest(url, options = {}) {
-
-    const headers = {
-        "Content-Type": "application/json"
-    };
-
-
-    if (tg?.initData) {
-
-        headers["X-Telegram-Init-Data"] =
-            tg.initData;
-
-    }
-
+async function api(
+    url,
+    options = {}
+) {
 
     const response = await fetch(
         url,
         {
             ...options,
-            headers
+
+            headers: {
+                ...headers,
+                ...(options.headers || {})
+            }
         }
     );
 
+    let data = null;
+
+    try {
+        data = await response.json();
+    } catch {
+        data = null;
+    }
 
     if (!response.ok) {
 
-        throw new Error(
-            `HTTP ${response.status}`
-        );
+        const error =
+            new Error(
+                data?.detail ||
+                `HTTP ${response.status}`
+            );
 
+        error.status =
+            response.status;
+
+        error.detail =
+            data?.detail;
+
+        throw error;
     }
 
-
-    return response.json();
+    return data;
 }
 
 
-async function searchFilms() {
+// =========================================================
+// HELPERS
+// =========================================================
 
-    const input =
-        document.getElementById(
-            "searchInput"
+function escapeHtml(value) {
+
+    if (
+        value === null ||
+        value === undefined
+    ) {
+        return "";
+    }
+
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+
+function $(id) {
+    return document.getElementById(id);
+}
+
+
+function show(id) {
+
+    const element = $(id);
+
+    if (element) {
+        element.classList.remove(
+            "hidden"
+        );
+    }
+}
+
+
+function hide(id) {
+
+    const element = $(id);
+
+    if (element) {
+        element.classList.add(
+            "hidden"
+        );
+    }
+}
+
+
+// =========================================================
+// ACCESS REQUIRED
+// =========================================================
+
+function showAccessRequired() {
+
+    let box =
+        $("accessRequired");
+
+    if (!box) {
+
+        box =
+            document.createElement(
+                "div"
+            );
+
+        box.id =
+            "accessRequired";
+
+        box.innerHTML = `
+            <div class="access-box">
+
+                <div class="access-icon">
+                    🔒
+                </div>
+
+                <h2>
+                    لومړی چینل Join کړئ
+                </h2>
+
+                <p>
+                    د فلمونو د لټون او ترلاسه کولو
+                    لپاره باید لومړی زموږ لازمي
+                    پښتو چینل Join کړئ.
+                </p>
+
+                <a
+                    href="https://t.me/ALL_PASHTO"
+                    target="_blank"
+                    class="access-button"
+                >
+                    📢 چینل Join کړئ
+                </a>
+
+                <button
+                    id="checkAccessBtn"
+                    class="access-check"
+                >
+                    ✅ ما Join کړ، بیا یې وګوره
+                </button>
+
+            </div>
+        `;
+
+        document.body.appendChild(
+            box
         );
 
-    const query =
-        input.value.trim();
+        const checkButton =
+            $("checkAccessBtn");
 
+        if (checkButton) {
 
-    if (query.length < 2) {
-
-        if (tg) {
-            tg.showAlert(
-                "لږ تر لږه ۲ حروف ولیکئ."
-            );
+            checkButton.onclick =
+                initialize;
         }
+    }
+
+    box.classList.remove(
+        "hidden"
+    );
+}
+
+
+function hideAccessRequired() {
+
+    const box =
+        $("accessRequired");
+
+    if (box) {
+
+        box.classList.add(
+            "hidden"
+        );
+    }
+}
+
+
+// =========================================================
+// USER
+// =========================================================
+
+let currentUser = null;
+
+async function loadMe() {
+
+    const data =
+        await api(
+            "/api/me"
+        );
+
+    currentUser =
+        data;
+
+    return data;
+}
+
+
+// =========================================================
+// REFERRALS
+// =========================================================
+
+async function loadReferralInfo() {
+
+    try {
+
+        const data =
+            await api(
+                "/api/referrals"
+            );
+
+        updateReferralUI(
+            data
+        );
+
+        return data;
+
+    } catch (error) {
+
+        console.error(
+            "Referral error:",
+            error
+        );
+
+        return null;
+    }
+}
+
+
+function updateReferralUI(
+    data
+) {
+
+    const count =
+        data.count || 0;
+
+    const target =
+        data.target || 50;
+
+    const remaining =
+        Math.max(
+            target - count,
+            0
+        );
+
+    const percentage =
+        Math.min(
+            (count / target) * 100,
+            100
+        );
+
+
+    setIfExists(
+        "referralCount",
+        count
+    );
+
+    setIfExists(
+        "referralTarget",
+        target
+    );
+
+    setIfExists(
+        "referralRemaining",
+        remaining
+    );
+
+
+    const progress =
+        $("referralProgress");
+
+    if (progress) {
+
+        progress.style.width =
+            `${percentage}%`;
+    }
+
+
+    const referralLink =
+        $("referralLink");
+
+    if (
+        referralLink &&
+        data.referral_link
+    ) {
+
+        referralLink.value =
+            data.referral_link;
+    }
+
+
+    const publishButton =
+        $("publishButton");
+
+    if (publishButton) {
+
+        if (data.can_publish) {
+
+            publishButton.disabled =
+                false;
+
+            publishButton.innerHTML =
+                "🎬 فلم نشر کړئ";
+
+        } else {
+
+            publishButton.disabled =
+                true;
+
+            publishButton.innerHTML =
+                `🔒 ${remaining} Referral پاتې`;
+        }
+    }
+}
+
+
+// =========================================================
+// LEADERS
+// =========================================================
+
+async function loadLeaders() {
+
+    try {
+
+        const leaders =
+            await api(
+                "/api/referrals/leaders"
+            );
+
+        renderLeaders(
+            leaders
+        );
+
+    } catch (error) {
+
+        console.error(
+            error
+        );
+    }
+}
+
+
+function renderLeaders(
+    leaders
+) {
+
+    const container =
+        $("leadersList");
+
+    if (!container) {
+        return;
+    }
+
+    if (!leaders.length) {
+
+        container.innerHTML =
+            `<div class="empty">
+                تر اوسه Referral نشته.
+            </div>`;
 
         return;
     }
 
+    container.innerHTML =
+        leaders.map(
+            (user, index) => {
 
-    sectionTitle.textContent =
-        "🔎 د لټون پایلې";
+                const name =
+                    user.username
+                        ? `@${escapeHtml(
+                            user.username
+                        )}`
+                        : escapeHtml(
+                            user.first_name ||
+                            "User"
+                        );
 
+                return `
+                    <div class="leader-item">
 
-    showLoading();
+                        <div class="leader-rank">
+                            ${
+                                index === 0
+                                    ? "🥇"
+                                    : index === 1
+                                    ? "🥈"
+                                    : index === 2
+                                    ? "🥉"
+                                    : `#${index + 1}`
+                            }
+                        </div>
 
+                        <div class="leader-name">
+                            ${name}
+                        </div>
 
-    try {
+                        <div class="leader-count">
+                            ${user.referral_count}
+                        </div>
 
-        const data =
-            await apiRequest(
-                `/api/films/search?q=${encodeURIComponent(query)}`
-            );
-
-
-        renderFilms(data.films);
-
-    }
-
-    catch (error) {
-
-        hideLoading();
-
-        console.error(error);
-
-        if (tg) {
-            tg.showAlert(
-                "د لټون پر مهال ستونزه رامنځته شوه."
-            );
-        }
-
-    }
-
+                    </div>
+                `;
+            }
+        ).join("");
 }
 
 
-async function showCategory(category) {
+// =========================================================
+// FILMS
+// =========================================================
 
-    sectionTitle.textContent =
-        "🎬 پښتو ترجمه فلمونه";
-
-    showLoading();
-
+async function loadLatestFilms() {
 
     try {
 
-        const data =
-            await apiRequest(
-                `/api/films/category/${encodeURIComponent(category)}`
+        const films =
+            await api(
+                "/api/films/latest"
             );
 
-        renderFilms(data.films);
+        renderFilms(
+            films,
+            "latestFilms"
+        );
 
+    } catch (error) {
+
+        handleApiError(
+            error
+        );
     }
-
-    catch (error) {
-
-        hideLoading();
-
-        console.error(error);
-
-    }
-
 }
 
 
-async function showOfficial() {
+async function searchFilms(
+    query
+) {
 
-    sectionTitle.textContent =
-        "📢 زموږ فلمونه";
+    if (!query.trim()) {
 
-    showLoading();
+        await loadLatestFilms();
 
+        return;
+    }
 
     try {
 
-        const data =
-            await apiRequest(
+        const films =
+            await api(
+                `/api/films/search?q=${encodeURIComponent(
+                    query
+                )}`
+            );
+
+        renderFilms(
+            films,
+            "searchResults"
+        );
+
+    } catch (error) {
+
+        handleApiError(
+            error
+        );
+    }
+}
+
+
+async function loadCategory(
+    category
+) {
+
+    try {
+
+        const films =
+            await api(
+                `/api/films/category/${encodeURIComponent(
+                    category
+                )}`
+            );
+
+        renderFilms(
+            films,
+            "categoryResults"
+        );
+
+    } catch (error) {
+
+        handleApiError(
+            error
+        );
+    }
+}
+
+
+async function loadOfficialFilms() {
+
+    try {
+
+        const films =
+            await api(
                 "/api/films/official"
             );
 
-        renderFilms(data.films);
+        renderFilms(
+            films,
+            "officialFilms"
+        );
 
+    } catch (error) {
+
+        handleApiError(
+            error
+        );
     }
-
-    catch (error) {
-
-        hideLoading();
-
-        console.error(error);
-
-    }
-
 }
 
 
-async function openFilm(id) {
+// =========================================================
+// FILM RENDER
+// =========================================================
 
-    try {
+function renderFilms(
+    films,
+    containerId
+) {
 
-        const data =
-            await apiRequest(
-                `/api/films/${id}`
-            );
+    const container =
+        $(containerId);
+
+    if (!container) {
+        return;
+    }
+
+    if (!films.length) {
+
+        container.innerHTML =
+            `<div class="empty">
+                🎬 فلم ونه موندل شو.
+            </div>`;
+
+        return;
+    }
+
+    container.innerHTML =
+        films.map(
+            film =>
+                renderFilmCard(
+                    film
+                )
+        ).join("");
+}
 
 
-        const film =
-            data.film;
+function renderFilmCard(
+    film
+) {
+
+    const poster =
+        film.poster_url
+            ? film.poster_url
+            : "";
 
 
-        modalBody.innerHTML = `
+    const meta = [
+        film.year
+            ? `📅 ${escapeHtml(
+                film.year
+            )}`
+            : "",
 
-            <h2>
-                🎬 ${escapeHtml(film.title)}
-            </h2>
+        film.quality
+            ? `⚙️ ${escapeHtml(
+                film.quality
+            )}`
+            : "",
 
-            <div class="details">
+        film.genre
+            ? `🎭 ${escapeHtml(
+                film.genre
+            )}`
+            : ""
+    ]
+    .filter(Boolean)
+    .join(" · ");
 
-                <p>
-                    📅 کال:
-                    <b>${escapeHtml(film.year || "—")}</b>
-                </p>
 
-                <p>
-                    ⚙️ کیفیت:
-                    <b>${escapeHtml(film.quality || "—")}</b>
-                </p>
+    return `
+        <div
+            class="film-card"
+            data-film-id="${film.id}"
+        >
 
-                <p>
-                    🎭 ژانر:
-                    <b>${escapeHtml(film.genre || "—")}</b>
-                </p>
+            <div class="film-poster">
 
-                <p>
-                    🔊 ژبه:
-                    <b>${escapeHtml(film.language || "—")}</b>
-                </p>
+                ${
+                    poster
+                    ? `
+                        <img
+                            src="${poster}"
+                            alt="${escapeHtml(
+                                film.title
+                            )}"
+                            loading="lazy"
+                        >
+                    `
+                    : `
+                        <div class="poster-placeholder">
+                            🎬
+                        </div>
+                    `
+                }
 
             </div>
 
-            <p>
-                ${escapeHtml(film.description || "")}
-            </p>
 
-            <button
-                class="download-button"
-                onclick="downloadFilm(${film.id})"
-            >
-                📥 فلم ترلاسه کړه
-            </button>
+            <div class="film-info">
 
-        `;
+                <h3>
+                    ${escapeHtml(
+                        film.title
+                    )}
+                </h3>
 
+                ${
+                    meta
+                    ? `
+                        <div class="film-meta">
+                            ${meta}
+                        </div>
+                    `
+                    : ""
+                }
 
-        modal.classList.remove("hidden");
+                ${
+                    film.official
+                    ? `
+                        <span class="official-badge">
+                            ⭐ زموږ فلم
+                        </span>
+                    `
+                    : ""
+                }
 
-    }
+                <button
+                    class="film-button"
+                    onclick="openFilm(
+                        ${film.id}
+                    )"
+                >
+                    🎬 فلم ترلاسه کړئ
+                </button>
 
-    catch (error) {
+            </div>
 
-        console.error(error);
-
-    }
-
+        </div>
+    `;
 }
 
 
-async function downloadFilm(id) {
+// =========================================================
+// OPEN FILM
+// =========================================================
+
+async function openFilm(
+    filmId
+) {
+
+    try {
+
+        const film =
+            await api(
+                `/api/films/${filmId}`
+            );
+
+        showFilmDetails(
+            film
+        );
+
+    } catch (error) {
+
+        handleApiError(
+            error
+        );
+    }
+}
+
+
+function showFilmDetails(
+    film
+) {
+
+    let modal =
+        $("filmModal");
+
+    if (!modal) {
+
+        modal =
+            document.createElement(
+                "div"
+            );
+
+        modal.id =
+            "filmModal";
+
+        modal.innerHTML = `
+            <div
+                class="film-modal-overlay"
+                onclick="closeFilmModal(event)"
+            >
+
+                <div
+                    class="film-modal"
+                    onclick="event.stopPropagation()"
+                >
+
+                    <button
+                        class="modal-close"
+                        onclick="closeFilmModal()"
+                    >
+                        ✕
+                    </button>
+
+                    <div id="filmModalContent">
+                    </div>
+
+                </div>
+
+            </div>
+        `;
+
+        document.body.appendChild(
+            modal
+        );
+    }
+
+
+    const poster =
+        film.poster_url
+            ? `
+                <img
+                    class="modal-poster"
+                    src="${film.poster_url}"
+                >
+            `
+            : `
+                <div class="modal-poster-placeholder">
+                    🎬
+                </div>
+            `;
+
+
+    const details = [
+        film.year
+            ? `📅 کال: ${escapeHtml(
+                film.year
+            )}`
+            : "",
+
+        film.quality
+            ? `⚙️ کیفیت: ${escapeHtml(
+                film.quality
+            )}`
+            : "",
+
+        film.genre
+            ? `🎭 ژانر: ${escapeHtml(
+                film.genre
+            )}`
+            : "",
+
+        film.language
+            ? `🔊 ژبه: ${escapeHtml(
+                film.language
+            )}`
+            : ""
+    ]
+    .filter(Boolean)
+    .map(
+        item =>
+            `<div>${item}</div>`
+    )
+    .join("");
+
+
+    $("filmModalContent").innerHTML = `
+
+        ${poster}
+
+        <h2>
+            ${escapeHtml(
+                film.title
+            )}
+        </h2>
+
+        <div class="modal-details">
+            ${details}
+        </div>
+
+        ${
+            film.description
+            ? `
+                <p class="modal-description">
+                    ${escapeHtml(
+                        film.description
+                    )}
+                </p>
+            `
+            : ""
+        }
+
+        <button
+            class="download-button"
+            onclick="downloadFilm(
+                ${film.id}
+            )"
+        >
+            🎬 فلم ترلاسه / Download
+        </button>
+
+    `;
+
+
+    modal.classList.remove(
+        "hidden"
+    );
+}
+
+
+function closeFilmModal(
+    event
+) {
+
+    if (
+        event &&
+        event.target &&
+        !event.target.classList.contains(
+            "film-modal-overlay"
+        )
+    ) {
+        return;
+    }
+
+    const modal =
+        $("filmModal");
+
+    if (modal) {
+
+        modal.classList.add(
+            "hidden"
+        );
+    }
+}
+
+
+// =========================================================
+// DOWNLOAD
+// =========================================================
+
+async function downloadFilm(
+    filmId
+) {
 
     try {
 
         const data =
-            await apiRequest(
-                `/api/films/${id}/download`
+            await api(
+                `/api/films/${filmId}/download`
             );
 
-
         if (
-            data.telegram_url &&
-            tg
+            data.url
         ) {
 
             tg.openTelegramLink(
-                data.telegram_url
+                data.url
+            );
+
+        }
+
+    } catch (error) {
+
+        handleApiError(
+            error
+        );
+    }
+}
+
+
+// =========================================================
+// REFERRAL LINK
+// =========================================================
+
+function copyReferralLink() {
+
+    const input =
+        $("referralLink");
+
+    if (!input) {
+        return;
+    }
+
+    if (
+        navigator.clipboard
+    ) {
+
+        navigator.clipboard.writeText(
+            input.value
+        );
+
+    } else {
+
+        input.select();
+
+        document.execCommand(
+            "copy"
+        );
+    }
+
+    tg.showPopup({
+        title: "Referral Link",
+        message: "ستاسو Referral Link کاپي شو.",
+        buttons: [
+            {
+                type: "ok"
+            }
+        ]
+    });
+}
+
+
+function shareReferralLink() {
+
+    const input =
+        $("referralLink");
+
+    if (
+        !input ||
+        !input.value
+    ) {
+        return;
+    }
+
+    const text =
+        "🎬 د ALL PRODUCTION FILMS سره یوځای شئ!\n\n" +
+        "زما له Referral Link څخه Join شئ:\n" +
+        input.value;
+
+
+    const url =
+        `https://t.me/share/url?url=${encodeURIComponent(
+            input.value
+        )}&text=${encodeURIComponent(
+            text
+        )}`;
+
+
+    tg.openTelegramLink(
+        url
+    );
+}
+
+
+// =========================================================
+// CATEGORY / TAB HELPERS
+// =========================================================
+
+async function showSection(
+    sectionId
+) {
+
+    document
+        .querySelectorAll(
+            ".app-section"
+        )
+        .forEach(
+            section => {
+
+                section.classList.add(
+                    "hidden"
+                );
+            }
+        );
+
+
+    const section =
+        $(sectionId);
+
+    if (section) {
+
+        section.classList.remove(
+            "hidden"
+        );
+    }
+}
+
+
+// =========================================================
+// PUBLISH STATUS
+// =========================================================
+
+function showPublishStatus() {
+
+    if (
+        !currentUser
+    ) {
+        return;
+    }
+
+    const button =
+        $("publishButton");
+
+    if (!button) {
+        return;
+    }
+
+    if (
+        currentUser.can_publish
+    ) {
+
+        button.disabled =
+            false;
+
+        button.innerHTML =
+            "🎬 فلم نشر کړئ";
+
+    } else {
+
+        button.disabled =
+            true;
+
+        const remaining =
+            Math.max(
+                currentUser.referral_target -
+                currentUser.referral_count,
+                0
+            );
+
+        button.innerHTML =
+            `🔒 ${remaining} Referral پاتې`;
+    }
+}
+
+
+// =========================================================
+// REFRESH
+// =========================================================
+
+async function refreshApp() {
+
+    try {
+
+        await loadMe();
+
+        showPublishStatus();
+
+        await Promise.all([
+            loadLatestFilms(),
+            loadReferralInfo(),
+            loadLeaders()
+        ]);
+
+    } catch (error) {
+
+        handleApiError(
+            error
+        );
+    }
+}
+
+
+// =========================================================
+// API ERROR
+// =========================================================
+
+function handleApiError(
+    error
+) {
+
+    console.error(
+        error
+    );
+
+    if (
+        error?.status === 403 &&
+        error?.detail ===
+            "ACCESS_REQUIRED"
+    ) {
+
+        showAccessRequired();
+
+        return;
+    }
+
+    if (
+        error?.status === 401
+    ) {
+
+        tg.showAlert(
+            "د Telegram WebApp معلومات ناسم دي."
+        );
+
+        return;
+    }
+
+    tg.showAlert(
+        error?.message ||
+        "یوه ستونزه رامنځته شوه."
+    );
+}
+
+
+// =========================================================
+// SAFE SET TEXT
+// =========================================================
+
+function setIfExists(
+    id,
+    value
+) {
+
+    const element =
+        $(id);
+
+    if (element) {
+
+        element.textContent =
+            value;
+    }
+}
+
+
+// =========================================================
+// INITIALIZE
+// =========================================================
+
+async function initialize() {
+
+    try {
+
+        if (!initData) {
+
+            tg.showAlert(
+                "دا Mini App باید له Telegram څخه خلاص شي."
             );
 
             return;
         }
 
 
-        if (tg) {
+        const user =
+            await loadMe();
 
-            tg.showAlert(
-                "فلم به د Telegram Bot له لارې درولېږل شي."
-            );
+        hideAccessRequired();
 
-        }
-
-    }
-
-    catch (error) {
-
-        console.error(error);
-
-    }
-
-}
+        showPublishStatus();
 
 
-async function showReferral() {
-
-    try {
-
-        const data =
-            await apiRequest(
-                "/api/referral"
-            );
+        await Promise.all([
+            loadLatestFilms(),
+            loadReferralInfo(),
+            loadLeaders()
+        ]);
 
 
-        modalBody.innerHTML = `
+    } catch (error) {
 
-            <h2>
-                👥 Referral
-            </h2>
-
-            <div class="referral-box">
-
-                <p>
-                    👤 ستا راوستل شوي کسان:
-                    <b>${data.count}</b>
-                </p>
-
-                <p>
-                    🎯 هدف:
-                    <b>${data.target}</b>
-                </p>
-
-                <p>
-                    ${escapeHtml(data.status)}
-                </p>
-
-                <input
-                    readonly
-                    value="${escapeHtml(data.link || "")}"
-                >
-
-                <button
-                    onclick="copyReferral()"
-                >
-                    📋 Link Copy کړه
-                </button>
-
-            </div>
-
-        `;
-
-
-        modal.classList.remove("hidden");
-
-    }
-
-    catch (error) {
-
-        console.error(error);
-
-    }
-
-}
-
-
-function copyReferral() {
-
-    const input =
-        document.querySelector(
-            ".referral-box input"
+        handleApiError(
+            error
         );
-
-
-    if (!input) {
-        return;
     }
-
-
-    navigator.clipboard
-        .writeText(input.value)
-        .then(() => {
-
-            if (tg) {
-
-                tg.showAlert(
-                    "✅ Referral Link Copy شو."
-                );
-
-            }
-
-        });
-
 }
 
 
-async function showLeaders() {
+// =========================================================
+// GLOBAL EVENTS
+// =========================================================
 
-    try {
+document.addEventListener(
+    "DOMContentLoaded",
+    () => {
 
-        const data =
-            await apiRequest(
-                "/api/referral/leaders"
-            );
-
-
-        let html =
-            "<h2>🏆 Referral Leaders</h2>";
-
-
-        if (!data.leaders.length) {
-
-            html +=
-                "<p>تر اوسه معلومات نشته.</p>";
-
-        }
-
-
-        data.leaders.forEach(
-            (user, index) => {
-
-                html += `
-
-                    <div class="leader">
-
-                        <span>
-                            #${index + 1}
-                        </span>
-
-                        <b>
-                            ${escapeHtml(
-                                user.name
-                            )}
-                        </b>
-
-                        <strong>
-                            ${user.count}
-                        </strong>
-
-                    </div>
-
-                `;
-
-            }
-        );
-
-
-        modalBody.innerHTML = html;
-
-        modal.classList.remove("hidden");
-
-    }
-
-    catch (error) {
-
-        console.error(error);
-
-    }
-
-}
-
-
-function closeModal() {
-
-    modal.classList.add(
-        "hidden"
-    );
-
-}
-
-
-window.addEventListener(
-    "click",
-    event => {
-
-        if (
-            event.target === modal
-        ) {
-
-            closeModal();
-
-        }
+        initialize();
 
     }
 );
 
 
-// Initial load
-async function loadLatest() {
+// =========================================================
+// TELEGRAM BACK BUTTON
+// =========================================================
 
-    showLoading();
+try {
 
-    try {
+    tg.BackButton.onClick(
+        () => {
 
-        const data =
-            await apiRequest(
-                "/api/films/latest"
-            );
+            window.history.back();
 
-        renderFilms(data.films);
+        }
+    );
 
-    }
-
-    catch (error) {
-
-        hideLoading();
-
-        console.error(error);
-
-    }
-
+} catch {
+    // Ignore
 }
 
 
-loadLatest();
+// =========================================================
+// EXPOSE FUNCTIONS
+// =========================================================
+
+window.openFilm =
+    openFilm;
+
+window.downloadFilm =
+    downloadFilm;
+
+window.closeFilmModal =
+    closeFilmModal;
+
+window.copyReferralLink =
+    copyReferralLink;
+
+window.shareReferralLink =
+    shareReferralLink;
+
+window.searchFilms =
+    searchFilms;
+
+window.loadCategory =
+    loadCategory;
+
+window.loadOfficialFilms =
+    loadOfficialFilms;
+
+window.showSection =
+    showSection;
