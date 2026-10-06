@@ -1,139 +1,107 @@
 import asyncio
 import logging
+from io import BytesIO
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
-    ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
 )
-from aiogram.utils.deep_linking import create_start_link
+
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import User, Film
+from app.models import Film, User
+from app.admin import get_statistics, is_admin
+from app.films import calculate_image_hash, create_film
 from app.referrals import (
-    get_or_create_user,
-    get_user,
-    get_referral_count,
-    can_publish,
-    get_referral_leaders,
-    create_referral_link,
+    ensure_referral_link,
+    get_referral_status,
     process_channel_join,
 )
-from app.films import (
-    create_film,
-    search_films,
-    get_film,
-)
-from app.admin import is_admin, get_statistics
 from app.settings_db import (
-    get_referral_target,
-    get_main_channel,
     get_access_channel,
     get_auto_approve,
+    get_main_channel,
+    get_referral_target,
 )
 
 logging.basicConfig(
-    level=logging.INFO
+    level=logging.INFO,
 )
 
-logger = logging.getLogger(
-    "all-production-bot"
-)
+logger = logging.getLogger(__name__)
 
-
-# =========================================================
-# BOT
-# =========================================================
+router = Router()
 
 bot = Bot(
     token=settings.BOT_TOKEN,
-    parse_mode=ParseMode.HTML,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    ),
 )
 
 dp = Dispatcher()
-
-router = Router()
 
 dp.include_router(router)
 
 
 # =========================================================
-# TEMPORARY PUBLISHING SESSIONS
+# TEMPORARY PUBLISHING STORAGE
 # =========================================================
 
 pending_submissions: dict[int, dict[str, Any]] = {}
 
 
 # =========================================================
-# HELPERS
+# KEYBOARDS
 # =========================================================
 
-def normalize_channel(value: str) -> str:
-
-    value = str(value or "").strip()
-
-    if value and not value.startswith("@"):
-        value = "@" + value
-
-    return value.lower()
-
-
 def main_menu_keyboard() -> InlineKeyboardMarkup:
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔍 د فلم لټون",
-                    callback_data="search_help",
-                ),
-                InlineKeyboardButton(
-                    text="🆕 نوي فلمونه",
-                    callback_data="latest_films",
+                    text="🎬 وروستي فلمونه",
+                    web_app=None,
+                    callback_data="films_latest",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="🎙️ پښتو فلمونه",
-                    callback_data="pashto_films",
+                    text="🔎 د فلم لټون",
+                    callback_data="search_info",
                 ),
                 InlineKeyboardButton(
-                    text="⭐ زموږ فلمونه",
-                    callback_data="official_films",
+                    text="👥 ریفرل",
+                    callback_data="referral",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="👥 دعوتونه",
-                    callback_data="referrals",
+                    text="🎥 فلم نشرول",
+                    callback_data="publish",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="🏆 مشران",
                     callback_data="leaders",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎬 فلم خپرول",
-                    callback_data="publish",
                 ),
             ],
         ]
     )
 
 
-async def access_keyboard() -> InlineKeyboardMarkup:
-
-    channel = await get_access_channel()
-
+def access_keyboard(channel: str) -> InlineKeyboardMarkup:
     username = channel.lstrip("@")
 
     return InlineKeyboardMarkup(
@@ -146,7 +114,7 @@ async def access_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="✅ ما Join کړی",
+                    text="✅ ما Join کړی، بیا وګوره",
                     callback_data="check_access",
                 )
             ],
@@ -154,183 +122,124 @@ async def access_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-async def user_has_access(
-    user_id: int,
+def publish_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎥 فلم نشرول شروع کړئ",
+                    callback_data="start_publish",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 شاته",
+                    callback_data="back_menu",
+                )
+            ],
+        ]
+    )
+
+
+# =========================================================
+# DATABASE USER
+# =========================================================
+
+async def get_or_create_user(
+    telegram_id: int,
+    username: str | None = None,
+    first_name: str | None = None,
+) -> User:
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(User).where(
+                User.telegram_id == telegram_id
+            )
+        )
+
+        user = result.scalar_one_or_none()
+
+        if user is None:
+
+            user = User(
+                telegram_id=telegram_id,
+                username=username,
+                first_name=first_name,
+            )
+
+            session.add(user)
+
+        else:
+
+            if username is not None:
+                user.username = username
+
+            if first_name is not None:
+                user.first_name = first_name
+
+        await session.commit()
+        await session.refresh(user)
+
+        return user
+
+
+# =========================================================
+# ACCESS CHECK
+# =========================================================
+
+async def check_channel_access(
+    telegram_id: int,
 ) -> bool:
 
     channel = await get_access_channel()
+
+    if not channel:
+        return True
 
     try:
 
         member = await bot.get_chat_member(
             chat_id=channel,
-            user_id=user_id,
+            user_id=telegram_id,
         )
 
-        return member.status in {
-            ChatMemberStatus.CREATOR,
-            ChatMemberStatus.ADMINISTRATOR,
+        allowed_statuses = {
             ChatMemberStatus.MEMBER,
-            ChatMemberStatus.RESTRICTED,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
         }
+
+        return member.status in allowed_statuses
 
     except Exception as exc:
 
         logger.warning(
-            "Access check failed: %s",
+            "Access check failed for %s: %s",
+            telegram_id,
             exc,
         )
 
         return False
 
 
-async def ensure_access(
+# =========================================================
+# SEND ACCESS REQUIRED
+# =========================================================
+
+async def send_access_required(
     message: Message,
-) -> bool:
+) -> None:
 
-    if not message.from_user:
-        return False
-
-    allowed = await user_has_access(
-        message.from_user.id
-    )
-
-    if allowed:
-        return True
+    channel = await get_access_channel()
 
     await message.answer(
-        "🔐 <b>لومړی چینل Join کړئ</b>\n\n"
-        "د روباټ د کارولو لپاره باید لومړی زموږ اړین "
-        "چینل Join کړئ.\n\n"
-        "له Join وروسته لاندې تڼۍ کېکاږئ:",
-        reply_markup=await access_keyboard(),
-    )
-
-    return False
-
-
-async def ensure_callback_access(
-    callback: CallbackQuery,
-) -> bool:
-
-    if not callback.from_user:
-        return False
-
-    allowed = await user_has_access(
-        callback.from_user.id
-    )
-
-    if allowed:
-        return True
-
-    await callback.answer(
-        "لومړی اړین چینل Join کړئ.",
-        show_alert=True,
-    )
-
-    try:
-        await callback.message.edit_text(
-            "🔐 <b>لومړی چینل Join کړئ</b>\n\n"
-            "لومړی زموږ اړین چینل Join کړئ، "
-            "بیا لاندې تڼۍ کېکاږئ:",
-            reply_markup=await access_keyboard(),
-        )
-
-    except Exception:
-        pass
-
-    return False
-
-
-async def get_or_register(
-    user_id: int,
-    username: str | None,
-    first_name: str | None,
-):
-
-    return await get_or_create_user(
-        telegram_id=user_id,
-        username=username,
-        first_name=first_name,
-    )
-
-
-async def make_user_referral_link(
-    user_id: int,
-) -> str:
-
-    user = await get_user(
-        user_id
-    )
-
-    if user and user.referral_link:
-        return user.referral_link
-
-    try:
-
-        link = await create_referral_link(
-            user_id
-        )
-
-        return link
-
-    except Exception as exc:
-
-        logger.exception(
-            "Referral link creation failed: %s",
-            exc,
-        )
-
-        # Fallback to Telegram bot deep link.
-        return await create_start_link(
-            bot,
-            f"ref_{user_id}",
-            encode=False,
-        )
-
-
-async def send_main_menu(
-    message: Message,
-):
-
-    user = message.from_user
-
-    if not user:
-        return
-
-    db_user = await get_or_register(
-        user.id,
-        user.username,
-        user.first_name,
-    )
-
-    target = await get_referral_target()
-
-    count = await get_referral_count(
-        user.id
-    )
-
-    publish = await can_publish(
-        user.id
-    )
-
-    status_text = (
-        "✅ <b>تاسو د فلم خپرولو اجازه لرئ.</b>"
-        if publish
-        else (
-            f"🔒 <b>فلم خپرول بند دي.</b>\n"
-            f"👥 دعوتونه: <b>{count}/{target}</b>"
-        )
-    )
-
-    await message.answer(
-        f"🎬 <b>ALL PRODUCTION FILMS</b>\n\n"
-        f"سلام <b>{user.first_name or 'ملګري'}</b>! 👋\n\n"
-        f"دلته کولای شئ پښتو فلمونه ولټوئ، "
-        f"فلمونه ترلاسه کړئ او د شرط پوره کولو وروسته "
-        f"خپل فلمونه هم خپاره کړئ.\n\n"
-        f"{status_text}",
-        reply_markup=main_menu_keyboard(),
+        "🔒 <b>د روباټ د استعمال لپاره</b>\n\n"
+        "لومړی زموږ اړین چینل Join کړئ.\n\n"
+        "له Join وروسته لاندې تڼۍ کې "
+        "«ما Join کړی» ووهئ.",
+        reply_markup=access_keyboard(channel),
     )
 
 
@@ -339,146 +248,99 @@ async def send_main_menu(
 # =========================================================
 
 @router.message(CommandStart())
-async def start_handler(
-    message: Message,
-):
+async def start_handler(message: Message):
 
     if not message.from_user:
         return
 
-    user = message.from_user
-
-    await get_or_register(
-        user.id,
-        user.username,
-        user.first_name,
+    user = await get_or_create_user(
+        telegram_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
     )
 
-    if not await ensure_access(
-        message
-    ):
+    # -----------------------------------------------------
+    # ACCESS
+    # -----------------------------------------------------
+
+    has_access = await check_channel_access(
+        message.from_user.id
+    )
+
+    if not has_access:
+
+        await send_access_required(message)
         return
 
-    args = ""
+    # -----------------------------------------------------
+    # REFERRAL LINK
+    # -----------------------------------------------------
 
-    if message.text:
-
-        parts = message.text.split(
-            maxsplit=1
-        )
-
-        if len(parts) == 2:
-            args = parts[1].strip()
-
-    # ---------------------------------------------
-    # FILM DEEP LINK
-    # ---------------------------------------------
-
-    if args.startswith("film_"):
+    async with SessionLocal() as session:
 
         try:
 
-            film_id = int(
-                args.replace(
-                    "film_",
-                    "",
-                    1,
+            await ensure_referral_link(
+                session,
+                user,
+            )
+
+            await session.commit()
+
+        except Exception:
+
+            await session.rollback()
+
+    # -----------------------------------------------------
+    # DEEP LINK
+    # -----------------------------------------------------
+
+    text = message.text or ""
+
+    if " " in text:
+
+        start_parameter = text.split(
+            " ",
+            1,
+        )[1].strip()
+
+        if start_parameter.startswith("film_"):
+
+            try:
+
+                film_id = int(
+                    start_parameter.replace(
+                        "film_",
+                        "",
+                        1,
+                    )
                 )
-            )
 
-        except ValueError:
-
-            film_id = 0
-
-        if film_id:
-
-            film = await get_film(
-                film_id
-            )
-
-            if film:
-
-                await send_film(
+                await send_film_to_user(
                     message,
-                    film,
+                    film_id,
                 )
 
                 return
 
-    # ---------------------------------------------
-    # REFERRAL DEEP LINK
-    # ---------------------------------------------
+            except ValueError:
+                pass
 
-    if args.startswith("ref_"):
+    # -----------------------------------------------------
+    # MAIN MENU
+    # -----------------------------------------------------
 
-        try:
-
-            inviter_id = int(
-                args.replace(
-                    "ref_",
-                    "",
-                    1,
-                )
-            )
-
-            if inviter_id != user.id:
-
-                await register_referral_deep_link(
-                    inviter_id,
-                    user.id,
-                )
-
-        except Exception as exc:
-
-            logger.warning(
-                "Referral deep-link error: %s",
-                exc,
-            )
-
-    await send_main_menu(
-        message
+    first_name = (
+        message.from_user.first_name
+        or "ملګري"
     )
 
-
-# =========================================================
-# REFERRAL DEEP LINK FALLBACK
-# =========================================================
-
-async def register_referral_deep_link(
-    inviter_id: int,
-    invited_id: int,
-):
-
-    async with SessionLocal() as session:
-
-        inviter_result = await session.execute(
-            select(User).where(
-                User.telegram_id == inviter_id
-            )
-        )
-
-        inviter = (
-            inviter_result.scalar_one_or_none()
-        )
-
-        invited_result = await session.execute(
-            select(User).where(
-                User.telegram_id == invited_id
-            )
-        )
-
-        invited = (
-            invited_result.scalar_one_or_none()
-        )
-
-        if not inviter or not invited:
-            return
-
-        # The real referral is counted when the
-        # invited user joins the main channel.
-        #
-        # This function intentionally does NOT
-        # increment referral_count.
+    await message.answer(
+        f"🎬 <b>ALL PRODUCTION FILMS</b>\n\n"
+        f"سلام <b>{first_name}</b>! 👋\n\n"
+        "د پښتو فلمونو نړۍ ته ښه راغلاست. 🍿",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 # =========================================================
@@ -495,253 +357,100 @@ async def check_access_callback(
     if not callback.from_user:
         return
 
-    allowed = await user_has_access(
+    allowed = await check_channel_access(
         callback.from_user.id
     )
 
     if not allowed:
 
         await callback.answer(
-            "❌ لا هم چینل Join شوی نه یاست.",
+            "❌ لا هم چینل Join شوی نه دی.",
             show_alert=True,
         )
 
         return
 
     await callback.answer(
-        "✅ Access فعال شو!",
-        show_alert=False,
+        "✅ Access فعال شو!"
     )
 
-    try:
+    if callback.message:
 
-        await callback.message.delete()
-
-    except Exception:
-        pass
-
-    await send_main_menu(
-        callback.message
-    )
-
-
-# =========================================================
-# CALLBACK MAIN MENU
-# =========================================================
-
-@router.callback_query(
-    F.data == "search_help"
-)
-async def search_help_callback(
-    callback: CallbackQuery,
-):
-
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
-
-    await callback.answer()
-
-    await callback.message.answer(
-        "🔍 <b>د فلم لټون</b>\n\n"
-        "د فلم نوم روباټ ته ولیکئ.\n\n"
-        "مثال:\n"
-        "<code>Avengers</code>\n"
-        "<code>جب هېري ميټ سجل</code>"
-    )
-
-
-@router.callback_query(
-    F.data == "latest_films"
-)
-async def latest_films_callback(
-    callback: CallbackQuery,
-):
-
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
-
-    await callback.answer()
-
-    async with SessionLocal() as session:
-
-        result = await session.execute(
-            select(Film)
-            .where(
-                Film.approved.is_(True)
-            )
-            .order_by(
-                Film.created_at.desc()
-            )
-            .limit(20)
-        )
-
-        films = result.scalars().all()
-
-    if not films:
-
-        await callback.message.answer(
-            "🎬 تر اوسه کوم فلم نه دی اضافه شوی."
-        )
-
-        return
-
-    await callback.message.answer(
-        "🆕 <b>وروستي فلمونه</b>"
-    )
-
-    for film in films:
-
-        await send_film(
-            callback.message,
-            film,
-            compact=True,
-        )
-
-
-@router.callback_query(
-    F.data == "pashto_films"
-)
-async def pashto_films_callback(
-    callback: CallbackQuery,
-):
-
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
-
-    await callback.answer()
-
-    async with SessionLocal() as session:
-
-        result = await session.execute(
-            select(Film)
-            .where(
-                Film.approved.is_(True),
-                Film.category == "pashto",
-            )
-            .order_by(
-                Film.created_at.desc()
-            )
-            .limit(20)
-        )
-
-        films = result.scalars().all()
-
-    if not films:
-
-        await callback.message.answer(
-            "🎙️ تر اوسه پښتو فلمونه نشته."
-        )
-
-        return
-
-    await callback.message.answer(
-        "🎙️ <b>پښتو فلمونه</b>"
-    )
-
-    for film in films:
-
-        await send_film(
-            callback.message,
-            film,
-            compact=True,
-        )
-
-
-@router.callback_query(
-    F.data == "official_films"
-)
-async def official_films_callback(
-    callback: CallbackQuery,
-):
-
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
-
-    await callback.answer()
-
-    async with SessionLocal() as session:
-
-        result = await session.execute(
-            select(Film)
-            .where(
-                Film.approved.is_(True),
-                Film.official.is_(True),
-            )
-            .order_by(
-                Film.created_at.desc()
-            )
-            .limit(20)
-        )
-
-        films = result.scalars().all()
-
-    if not films:
-
-        await callback.message.answer(
-            "⭐ تر اوسه رسمي فلمونه نشته."
-        )
-
-        return
-
-    await callback.message.answer(
-        "⭐ <b>زموږ فلمونه</b>"
-    )
-
-    for film in films:
-
-        await send_film(
-            callback.message,
-            film,
-            compact=True,
+        await callback.message.edit_text(
+            "✅ <b>Access فعال شو!</b>\n\n"
+            "اوس کولای شئ روباټ استعمال کړئ.",
+            reply_markup=main_menu_keyboard(),
         )
 
 
 # =========================================================
-# REFERRALS
+# BACK MENU
 # =========================================================
 
 @router.callback_query(
-    F.data == "referrals"
+    F.data == "back_menu"
 )
-async def referrals_callback(
+async def back_menu_callback(
     callback: CallbackQuery,
 ):
 
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
-
     await callback.answer()
 
-    user = callback.from_user
+    if callback.message:
 
-    await get_or_register(
-        user.id,
-        user.username,
-        user.first_name,
+        await callback.message.edit_text(
+            "🏠 <b>اصلي مینو</b>\n\n"
+            "مهرباني وکړئ یو انتخاب وکړئ.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+
+# =========================================================
+# REFERRAL
+# =========================================================
+
+@router.callback_query(
+    F.data == "referral"
+)
+async def referral_callback(
+    callback: CallbackQuery,
+):
+
+    if not callback.from_user:
+        return
+
+    if not await check_channel_access(
+        callback.from_user.id
+    ):
+
+        await callback.answer(
+            "🔒 لومړی اړین چینل Join کړئ.",
+            show_alert=True,
+        )
+
+        return
+
+    status = await get_referral_status(
+        callback.from_user.id
     )
 
-    count = await get_referral_count(
-        user.id
+    if not status:
+
+        await callback.answer(
+            "❌ د ریفرل معلومات پیدا نه شول.",
+            show_alert=True,
+        )
+
+        return
+
+    count = status.get(
+        "referral_count",
+        0,
     )
 
-    target = await get_referral_target()
-
-    allowed = await can_publish(
-        user.id
-    )
-
-    link = await make_user_referral_link(
-        user.id
+    target = status.get(
+        "target",
+        await get_referral_target(),
     )
 
     remaining = max(
@@ -749,65 +458,75 @@ async def referrals_callback(
         0,
     )
 
-    status = (
-        "🎉 <b>مبارک!</b> تاسو د فلم خپرولو اجازه لرئ."
-        if allowed
-        else (
-            f"🔒 لا <b>{remaining}</b> دعوتونه پاتې دي."
-        )
+    referral_link = status.get(
+        "referral_link"
     )
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
+    publish_status = (
+        "🟢 تاسو د فلم نشرولو اجازه لرئ."
+        if count >= target
+        else f"🔒 د نشر لپاره {remaining} ریفرل پاتې دي."
+    )
+
+    text = (
+        "👥 <b>ستاسو ریفرل سیستم</b>\n\n"
+        f"📊 ریفرل: <b>{count}</b> / <b>{target}</b>\n"
+        f"⏳ پاتې: <b>{remaining}</b>\n\n"
+        f"{publish_status}\n\n"
+        f"🔗 <code>{referral_link or 'لا نه دی جوړ شوی'}</code>"
+    )
+
+    keyboard_rows = []
+
+    if referral_link:
+
+        keyboard_rows.append(
             [
                 InlineKeyboardButton(
-                    text="📋 زما لینک",
-                    callback_data="my_referral_link",
+                    text="📤 لینک شریکول",
+                    url=(
+                        "https://t.me/share/url"
+                        f"?url={referral_link}"
+                    ),
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🏆 د دعوتونو مشران",
-                    callback_data="leaders",
-                )
-            ],
+            ]
+        )
+
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔄 تازه کول",
+                callback_data="referral",
+            )
         ]
     )
 
-    await callback.message.answer(
-        f"👥 <b>د ملګرو دعوت</b>\n\n"
-        f"📊 ستا دعوتونه: <b>{count}/{target}</b>\n"
-        f"⏳ پاتې: <b>{remaining}</b>\n\n"
-        f"{status}\n\n"
-        f"🔗 <code>{link}</code>",
-        reply_markup=keyboard,
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 شاته",
+                callback_data="back_menu",
+            )
+        ]
     )
 
-
-@router.callback_query(
-    F.data == "my_referral_link"
-)
-async def my_referral_link_callback(
-    callback: CallbackQuery,
-):
-
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=keyboard_rows
+    )
 
     await callback.answer()
 
-    link = await make_user_referral_link(
-        callback.from_user.id
-    )
+    if callback.message:
 
-    await callback.message.answer(
-        "🔗 <b>ستاسو ځانګړی دعوت لینک:</b>\n\n"
-        f"<code>{link}</code>\n\n"
-        "📢 دا لینک خپلو ملګرو ته واستوئ."
-    )
+        await callback.message.edit_text(
+            text,
+            reply_markup=keyboard,
+        )
 
+
+# =========================================================
+# LEADERS
+# =========================================================
 
 @router.callback_query(
     F.data == "leaders"
@@ -816,33 +535,62 @@ async def leaders_callback(
     callback: CallbackQuery,
 ):
 
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
-
     await callback.answer()
 
-    leaders = await get_referral_leaders(
-        20
-    )
+    if not callback.message:
+        return
 
-    if not leaders:
+    async with SessionLocal() as session:
 
-        await callback.message.answer(
-            "🏆 تر اوسه کوم دعوت کوونکی نشته."
+        result = await session.execute(
+            select(User)
+            .where(
+                User.referral_count > 0
+            )
+            .order_by(
+                User.referral_count.desc()
+            )
+            .limit(10)
+        )
+
+        users = result.scalars().all()
+
+    if not users:
+
+        await callback.message.edit_text(
+            "🏆 <b>د ریفرل مشران</b>\n\n"
+            "تر اوسه کوم ریفرل نشته.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔙 شاته",
+                            callback_data="back_menu",
+                        )
+                    ]
+                ]
+            ),
         )
 
         return
 
     lines = [
-        "🏆 <b>د دعوتونو مشران</b>\n"
+        "🏆 <b>د ریفرل ۱۰ مشران</b>\n"
     ]
 
-    for index, user in enumerate(
-        leaders,
-        start=1,
-    ):
+    medals = [
+        "🥇",
+        "🥈",
+        "🥉",
+    ]
+
+    for index, user in enumerate(users, start=1):
+
+        medal = (
+            medals[index - 1]
+            if index <= 3
+            else f"{index}."
+        )
 
         name = (
             user.first_name
@@ -851,17 +599,27 @@ async def leaders_callback(
         )
 
         lines.append(
-            f"{index}. <b>{name}</b> — "
-            f"{user.referral_count} 👥"
+            f"{medal} <b>{name}</b> — "
+            f"{user.referral_count} ریفرل"
         )
 
-    await callback.message.answer(
-        "\n".join(lines)
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔙 شاته",
+                        callback_data="back_menu",
+                    )
+                ]
+            ]
+        ),
     )
 
 
 # =========================================================
-# PUBLISH
+# PUBLISH INFO
 # =========================================================
 
 @router.callback_query(
@@ -871,228 +629,210 @@ async def publish_callback(
     callback: CallbackQuery,
 ):
 
-    if not await ensure_callback_access(
-        callback
+    if not callback.from_user:
+        return
+
+    if not await check_channel_access(
+        callback.from_user.id
     ):
+
+        await callback.answer(
+            "🔒 لومړی اړین چینل Join کړئ.",
+            show_alert=True,
+        )
+
+        return
+
+    status = await get_referral_status(
+        callback.from_user.id
+    )
+
+    count = (
+        status.get("referral_count", 0)
+        if status
+        else 0
+    )
+
+    target = await get_referral_target()
+
+    if count < target:
+
+        remaining = target - count
+
+        await callback.answer(
+            f"🔒 لا {remaining} ریفرل پاتې دي.",
+            show_alert=True,
+        )
+
         return
 
     await callback.answer()
 
-    user_id = callback.from_user.id
+    if callback.message:
 
-    allowed = await can_publish(
-        user_id
-    )
-
-    if not allowed:
-
-        count = await get_referral_count(
-            user_id
+        await callback.message.edit_text(
+            "🎥 <b>فلم نشرول</b>\n\n"
+            "تاسو د فلم نشرولو اجازه لرئ. ✅\n\n"
+            "لومړی فلم Video یا Document "
+            "په همدې چټ کې راولېږئ.",
+            reply_markup=publish_keyboard(),
         )
 
-        target = await get_referral_target()
 
-        await callback.message.answer(
-            "🔒 <b>فلم خپرول لا نه دي فعال.</b>\n\n"
-            f"👥 ستا دعوتونه: <b>{count}/{target}</b>\n"
-            f"📌 پاتې دعوتونه: "
-            f"<b>{max(target - count, 0)}</b>"
+# =========================================================
+# START PUBLISH
+# =========================================================
+
+@router.callback_query(
+    F.data == "start_publish"
+)
+async def start_publish_callback(
+    callback: CallbackQuery,
+):
+
+    if not callback.from_user:
+        return
+
+    status = await get_referral_status(
+        callback.from_user.id
+    )
+
+    count = (
+        status.get("referral_count", 0)
+        if status
+        else 0
+    )
+
+    target = await get_referral_target()
+
+    if count < target:
+
+        await callback.answer(
+            "❌ تاسو لا د نشر شرط نه دی بشپړ کړی.",
+            show_alert=True,
         )
 
         return
 
-    pending_submissions[user_id] = {
-        "step": "video"
+    pending_submissions[
+        callback.from_user.id
+    ] = {
+        "step": "video",
+        "data": {},
     }
 
-    await callback.message.answer(
-        "🎬 <b>د فلم خپرولو سیستم</b>\n\n"
-        "لومړی خپل فلم د <b>Video</b> په توګه راولېږئ.\n\n"
-        "وروسته به د فلم معلومات درڅخه وغواړم.\n\n"
-        "❌ د لغوه کولو لپاره /cancel ولیکئ."
-    )
+    await callback.answer()
 
+    if callback.message:
 
-@router.message(
-    Command("cancel")
-)
-async def cancel_handler(
-    message: Message,
-):
-
-    user_id = (
-        message.from_user.id
-        if message.from_user
-        else 0
-    )
-
-    pending_submissions.pop(
-        user_id,
-        None,
-    )
-
-    await message.answer(
-        "❌ د فلم خپرولو پروسه لغوه شوه."
-    )
+        await callback.message.edit_text(
+            "🎥 <b>لومړی ګام</b>\n\n"
+            "اوس د فلم <b>Video</b> یا "
+            "<b>Document</b> راولېږئ.\n\n"
+            "وروسته به د فلم نور معلومات درڅخه وغواړل شي."
+        )
 
 
 # =========================================================
-# VIDEO SUBMISSION
+# RECEIVE VIDEO
 # =========================================================
 
 @router.message(
     F.video
 )
-async def video_handler(
+async def receive_video(
     message: Message,
 ):
 
     if not message.from_user:
         return
 
-    if not await ensure_access(
-        message
-    ):
-        return
-
     user_id = message.from_user.id
 
-    allowed = await can_publish(
+    if not await check_channel_access(
+        user_id
+    ):
+
+        await send_access_required(message)
+        return
+
+    pending = pending_submissions.get(
         user_id
     )
 
-    if not allowed:
-
-        await message.answer(
-            "🔒 تاسو لا د فلم خپرولو اجازه نه لرئ."
-        )
-
-        return
-
-    session = pending_submissions.get(
-        user_id
-    )
-
-    if not session:
-
-        await message.answer(
-            "ℹ️ د فلم خپرولو لپاره لومړی "
-            "د <b>🎬 فلم خپرول</b> تڼۍ وکاروئ."
-        )
-
-        return
-
-    if session.get("step") != "video":
-
-        await message.answer(
-            "ℹ️ اوس د فلم معلوماتو ته اړتیا ده."
-        )
-
+    if not pending:
         return
 
     video = message.video
 
-    session["video_file_id"] = (
-        video.file_id
-    )
+    pending["data"] = {
+        "video_file_id": video.file_id,
+        "video_file_unique_id": video.file_unique_id,
+    }
 
-    session["video_unique_id"] = (
-        video.file_unique_id
-    )
-
-    session["step"] = "title"
+    pending["step"] = "title"
 
     await message.answer(
         "✅ فلم ترلاسه شو.\n\n"
-        "📝 اوس د فلم <b>نوم</b> راولېږئ."
+        "📝 <b>دوهم ګام:</b>\n"
+        "د فلم نوم راولېږئ."
     )
 
 
 # =========================================================
-# DOCUMENT SUBMISSION
+# RECEIVE DOCUMENT
 # =========================================================
 
 @router.message(
     F.document
 )
-async def document_handler(
+async def receive_document(
     message: Message,
 ):
 
     if not message.from_user:
         return
 
-    if not await ensure_access(
-        message
-    ):
-        return
-
     user_id = message.from_user.id
 
-    allowed = await can_publish(
+    if not await check_channel_access(
+        user_id
+    ):
+
+        await send_access_required(message)
+        return
+
+    pending = pending_submissions.get(
         user_id
     )
 
-    if not allowed:
-
-        await message.answer(
-            "🔒 تاسو لا د فلم خپرولو اجازه نه لرئ."
-        )
-
-        return
-
-    session = pending_submissions.get(
-        user_id
-    )
-
-    if not session:
-
-        await message.answer(
-            "ℹ️ لومړی د فلم خپرولو سیستم فعال کړئ."
-        )
-
-        return
-
-    if session.get("step") != "video":
-
-        await message.answer(
-            "ℹ️ اوس د فلم نوم ته اړتیا ده."
-        )
-
+    if not pending:
         return
 
     document = message.document
 
-    # This version accepts documents as well.
-    # The Film model stores Telegram file_id.
-    # Delivery will be handled as a Telegram file.
+    pending["data"] = {
+        "video_file_id": document.file_id,
+        "video_file_unique_id": document.file_unique_id,
+    }
 
-    session["video_file_id"] = (
-        document.file_id
-    )
-
-    session["video_unique_id"] = (
-        document.file_unique_id
-    )
-
-    session["media_type"] = "document"
-
-    session["step"] = "title"
+    pending["step"] = "title"
 
     await message.answer(
-        "✅ فایل ترلاسه شو.\n\n"
-        "📝 اوس د فلم <b>نوم</b> راولېږئ."
+        "✅ فلم ترلاسه شو.\n\n"
+        "📝 <b>دوهم ګام:</b>\n"
+        "د فلم نوم راولېږئ."
     )
 
 
 # =========================================================
-# PUBLISH TEXT FLOW
+# RECEIVE TEXT METADATA
 # =========================================================
 
 @router.message(
     F.text
 )
-async def text_handler(
+async def receive_publish_text(
     message: Message,
 ):
 
@@ -1101,306 +841,198 @@ async def text_handler(
 
     user_id = message.from_user.id
 
-    # Commands are handled by command filters.
-    if message.text.startswith("/"):
-        return
-
-    if not await ensure_access(
-        message
-    ):
-        return
-
-    session = pending_submissions.get(
+    pending = pending_submissions.get(
         user_id
     )
 
-    # ---------------------------------------------
-    # NO PUBLISHING SESSION = SEARCH
-    # ---------------------------------------------
-
-    if not session:
-
-        query = message.text.strip()
-
-        if not query:
-            return
-
-        films = await search_films(
-            query
-        )
-
-        if not films:
-
-            await message.answer(
-                "🔍 <b>فلم پیدا نه شو.</b>\n\n"
-                "د فلم نوم په بله بڼه هم وازمویئ."
-            )
-
-            return
-
-        await message.answer(
-            f"🔍 د <b>{query}</b> لپاره "
-            f"{len(films)} فلمونه وموندل شول:"
-        )
-
-        for film in films:
-
-            await send_film(
-                message,
-                film,
-                compact=True,
-            )
-
+    if not pending:
         return
 
-    # ---------------------------------------------
-    # TITLE
-    # ---------------------------------------------
+    if message.text.startswith("/"):
+        return
 
-    step = session.get(
-        "step"
-    )
+    text = message.text.strip()
+
+    step = pending.get("step")
 
     if step == "title":
 
-        session["title"] = (
-            message.text.strip()
-        )
-
-        session["step"] = "year"
+        pending["data"]["title"] = text
+        pending["step"] = "year"
 
         await message.answer(
-            "📅 د فلم د خپرېدو کال راولېږئ.\n\n"
-            "مثال: <code>2025</code>\n"
-            "که معلوم نه وي، <code>-</code> ولیکئ."
+            "📅 <b>درېیم ګام:</b>\n"
+            "د فلم د خپرېدو کال راولېږئ.\n\n"
+            "مثال: <code>2017</code>"
         )
 
         return
-
-    # ---------------------------------------------
-    # YEAR
-    # ---------------------------------------------
 
     if step == "year":
 
-        value = message.text.strip()
+        try:
 
-        session["year"] = (
-            None
-            if value == "-"
-            else value
-        )
+            year = int(text)
 
-        session["step"] = "quality"
+        except ValueError:
 
-        await message.answer(
-            "⚙️ د فلم کیفیت راولېږئ.\n\n"
-            "مثال: <code>720p</code>\n"
-            "یا <code>1080p</code>"
-        )
-
-        return
-
-    # ---------------------------------------------
-    # QUALITY
-    # ---------------------------------------------
-
-    if step == "quality":
-
-        value = message.text.strip()
-
-        session["quality"] = (
-            None
-            if value == "-"
-            else value
-        )
-
-        session["step"] = "genre"
-
-        await message.answer(
-            "🎭 د فلم ژانر راولېږئ.\n\n"
-            "مثال:\n"
-            "<code>عاشقانه، مسخراچي</code>\n\n"
-            "که معلوم نه وي، <code>-</code> ولیکئ."
-        )
-
-        return
-
-    # ---------------------------------------------
-    # GENRE
-    # ---------------------------------------------
-
-    if step == "genre":
-
-        value = message.text.strip()
-
-        session["genre"] = (
-            None
-            if value == "-"
-            else value
-        )
-
-        session["step"] = "language"
-
-        await message.answer(
-            "🔊 د فلم ژبه / ډول راولېږئ.\n\n"
-            "مثال:\n"
-            "<code>پښتو ژباړه</code>\n\n"
-            "که معلومه نه وي، <code>-</code> ولیکئ."
-        )
-
-        return
-
-    # ---------------------------------------------
-    # LANGUAGE
-    # ---------------------------------------------
-
-    if step == "language":
-
-        value = message.text.strip()
-
-        session["language"] = (
-            None
-            if value == "-"
-            else value
-        )
-
-        session["step"] = "description"
-
-        await message.answer(
-            "📝 د فلم لنډه تشریح راولېږئ.\n\n"
-            "که تشریح نه غواړئ، <code>-</code> ولیکئ."
-        )
-
-        return
-
-    # ---------------------------------------------
-    # DESCRIPTION
-    # ---------------------------------------------
-
-    if step == "description":
-
-        value = message.text.strip()
-
-        session["description"] = (
-            None
-            if value == "-"
-            else value
-        )
-
-        session["step"] = "poster"
-
-        await message.answer(
-            "🖼️ اوس د فلم <b>Poster</b> عکس راولېږئ.\n\n"
-            "که Poster نه لرئ، <code>-</code> ولیکئ."
-        )
-
-        return
-
-    # ---------------------------------------------
-    # POSTER SKIP
-    # ---------------------------------------------
-
-    if step == "poster":
-
-        if message.text.strip() == "-":
-
-            await finalize_film_submission(
-                message
+            await message.answer(
+                "❌ کال باید په عددونو وي.\n"
+                "مثال: <code>2017</code>"
             )
 
             return
 
+        pending["data"]["year"] = year
+        pending["step"] = "quality"
+
         await message.answer(
-            "🖼️ مهرباني وکړئ Poster د عکس "
-            "په توګه راولېږئ، یا <code>-</code> ولیکئ."
+            "⚙️ <b>څلورم ګام:</b>\n"
+            "د فلم کیفیت راولېږئ.\n\n"
+            "مثال: <code>720p</code>"
         )
+
+        return
+
+    if step == "quality":
+
+        pending["data"]["quality"] = text
+        pending["step"] = "genre"
+
+        await message.answer(
+            "🎭 <b>پنځم ګام:</b>\n"
+            "د فلم ژانر راولېږئ.\n\n"
+            "مثال: <code>عاشقانه، مسخراچي</code>"
+        )
+
+        return
+
+    if step == "genre":
+
+        pending["data"]["genre"] = text
+        pending["step"] = "language"
+
+        await message.answer(
+            "🔊 <b>شپږم ګام:</b>\n"
+            "د فلم ژبه راولېږئ.\n\n"
+            "مثال: <code>پښتو</code>"
+        )
+
+        return
+
+    if step == "language":
+
+        pending["data"]["language"] = text
+        pending["step"] = "description"
+
+        await message.answer(
+            "📝 <b>اووم ګام:</b>\n"
+            "د فلم لنډه تشریح راولېږئ.\n\n"
+            "که تشریح نه غواړئ، ولیکئ:\n"
+            "<code>نه</code>"
+        )
+
+        return
+
+    if step == "description":
+
+        description = (
+            ""
+            if text.lower() in {
+                "نه",
+                "no",
+                "none",
+            }
+            else text
+        )
+
+        pending["data"]["description"] = description
+        pending["step"] = "poster"
+
+        await message.answer(
+            "🖼️ <b>اتم ګام:</b>\n"
+            "اوس د فلم Poster عکس راولېږئ."
+        )
+
+        return
 
 
 # =========================================================
-# POSTER
+# RECEIVE POSTER
 # =========================================================
 
 @router.message(
     F.photo
 )
-async def poster_handler(
+async def receive_poster(
     message: Message,
 ):
 
     if not message.from_user:
         return
 
-    if not await ensure_access(
-        message
-    ):
-        return
-
     user_id = message.from_user.id
 
-    session = pending_submissions.get(
+    pending = pending_submissions.get(
         user_id
     )
 
-    if not session:
+    if not pending:
         return
 
-    if session.get("step") != "poster":
-
-        await message.answer(
-            "ℹ️ اوس د Poster اړتیا نشته."
-        )
-
+    if pending.get("step") != "poster":
         return
 
     photo = message.photo[-1]
 
-    session["poster_file_id"] = (
-        photo.file_id
-    )
-
-    session["poster_unique_id"] = (
-        photo.file_unique_id
-    )
-
-    # Download poster temporarily only to
-    # calculate pHash.
     try:
 
-        telegram_file = await bot.get_file(
+        file = await bot.get_file(
             photo.file_id
         )
-
-        from io import BytesIO
 
         buffer = BytesIO()
 
         await bot.download_file(
-            telegram_file.file_path,
+            file.file_path,
             buffer,
         )
 
-        buffer.seek(0)
+        poster_bytes = buffer.getvalue()
 
-        from app.films import (
-            calculate_image_hash
-        )
-
-        session["poster_hash"] = (
-            calculate_image_hash(
-                buffer.getvalue()
-            )
+        poster_hash = calculate_image_hash(
+            poster_bytes
         )
 
     except Exception as exc:
 
-        logger.warning(
-            "Poster hash failed: %s",
+        logger.exception(
+            "Poster processing failed: %s",
             exc,
         )
 
+        await message.answer(
+            "❌ د Poster پروسس کې ستونزه راغله.\n"
+            "مهرباني وکړئ بیا عکس راولېږئ."
+        )
+
+        return
+
+    pending["data"]["poster_file_id"] = (
+        photo.file_id
+    )
+
+    pending["data"]["poster_file_unique_id"] = (
+        photo.file_unique_id
+    )
+
+    pending["data"]["poster_hash"] = (
+        str(poster_hash)
+    )
+
     await finalize_film_submission(
-        message
+        message,
+        user_id,
     )
 
 
@@ -1410,106 +1042,190 @@ async def poster_handler(
 
 async def finalize_film_submission(
     message: Message,
+    user_id: int,
 ):
 
-    if not message.from_user:
-        return
-
-    user_id = message.from_user.id
-
-    session = pending_submissions.get(
+    pending = pending_submissions.get(
         user_id
     )
 
-    if not session:
+    if not pending:
         return
 
-    title = session.get(
-        "title"
+    data = pending.get(
+        "data",
+        {}
     )
 
-    video_file_id = session.get(
-        "video_file_id"
-    )
+    required_fields = [
+        "title",
+        "year",
+        "quality",
+        "genre",
+        "language",
+        "video_file_id",
+        "poster_file_id",
+    ]
 
-    if not title or not video_file_id:
+    missing = [
+        field
+        for field in required_fields
+        if not data.get(field)
+    ]
+
+    if missing:
 
         await message.answer(
-            "❌ د فلم معلومات نیمګړي دي."
-        )
-
-        pending_submissions.pop(
-            user_id,
-            None,
+            "❌ د فلم ځینې معلومات نیمګړي دي.\n"
+            "مهرباني وکړئ بیا هڅه وکړئ."
         )
 
         return
 
-    auto_approve = await get_auto_approve()
+    try:
 
-    approved = auto_approve
+        async with SessionLocal() as session:
 
-    film = await create_film(
-        title=title,
-        video_file_id=video_file_id,
-        video_file_unique_id=session.get(
-            "video_unique_id"
-        ),
-        uploader_id=user_id,
-        year=session.get(
-            "year"
-        ),
-        quality=session.get(
-            "quality"
-        ),
-        genre=session.get(
-            "genre"
-        ),
-        language=session.get(
-            "language"
-        ),
-        description=session.get(
-            "description"
-        ),
-        category="pashto",
-        poster_file_id=session.get(
-            "poster_file_id"
-        ),
-        poster_file_unique_id=session.get(
-            "poster_unique_id"
-        ),
-        poster_hash=session.get(
-            "poster_hash"
-        ),
-        approved=approved,
-        official=False,
-    )
+            user_result = await session.execute(
+                select(User).where(
+                    User.telegram_id == user_id
+                )
+            )
+
+            user = (
+                user_result.scalar_one_or_none()
+            )
+
+            if not user:
+
+                await message.answer(
+                    "❌ کارن پیدا نه شو."
+                )
+
+                return
+
+            auto_approve = (
+                await get_auto_approve()
+            )
+
+            film = await create_film(
+                session=session,
+                title=data["title"],
+                year=data["year"],
+                quality=data["quality"],
+                genre=data["genre"],
+                language=data["language"],
+                description=data.get(
+                    "description",
+                    "",
+                ),
+                category=data.get(
+                    "genre",
+                    "",
+                ),
+                video_file_id=data[
+                    "video_file_id"
+                ],
+                video_file_unique_id=data.get(
+                    "video_file_unique_id"
+                ),
+                poster_file_id=data[
+                    "poster_file_id"
+                ],
+                poster_file_unique_id=data.get(
+                    "poster_file_unique_id"
+                ),
+                poster_hash=data.get(
+                    "poster_hash"
+                ),
+                uploader_id=user.id,
+                approved=auto_approve,
+            )
+
+            await session.commit()
+
+            film_id = film.id
+
+    except Exception as exc:
+
+        logger.exception(
+            "Film creation failed: %s",
+            exc,
+        )
+
+        await message.answer(
+            "❌ فلم ثبت نه شو.\n"
+            "مهرباني وکړئ وروسته بیا هڅه وکړئ."
+        )
+
+        return
 
     pending_submissions.pop(
         user_id,
         None,
     )
 
-    if approved:
+    if auto_approve:
 
         await message.answer(
-            "🎉 <b>فلم په بریالیتوب سره ثبت شو!</b>\n\n"
-            f"🎬 نوم: <b>{film.title}</b>\n"
-            f"🆔 ID: <code>{film.id}</code>\n\n"
-            "✅ فلم اوس د لټون او فلمونو په برخه کې ښکاره کېدای شي."
+            "🎉 <b>فلم په بریالیتوب سره ثبت او خپور شو!</b>\n\n"
+            f"🎬 <b>{data['title']}</b>\n"
+            f"🆔 ID: <code>{film_id}</code>\n\n"
+            "کار مو مبارک شه. 🍿"
         )
 
     else:
 
         await message.answer(
-            "✅ <b>فلم ترلاسه شو.</b>\n\n"
-            f"🎬 نوم: <b>{film.title}</b>\n"
-            f"🆔 ID: <code>{film.id}</code>\n\n"
-            "⏳ فلم د Admin تایید ته واستول شو."
+            "✅ <b>فلم ترلاسه او ثبت شو.</b>\n\n"
+            f"🎬 <b>{data['title']}</b>\n"
+            f"🆔 ID: <code>{film_id}</code>\n\n"
+            "⏳ اوس د Admin تایید ته انتظار وباسئ."
         )
 
-        await notify_admins_about_film(
-            film
+
+# =========================================================
+# LATEST FILMS
+# =========================================================
+
+@router.callback_query(
+    F.data == "films_latest"
+)
+async def latest_films_callback(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    if callback.message:
+
+        await callback.message.answer(
+            "🎬 وروستي فلمونه د Mini App له لارې "
+            "په اسانۍ موندلای شئ.",
+        )
+
+
+# =========================================================
+# SEARCH INFO
+# =========================================================
+
+@router.callback_query(
+    F.data == "search_info"
+)
+async def search_info_callback(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    if callback.message:
+
+        await callback.message.answer(
+            "🔎 <b>د فلم لټون</b>\n\n"
+            "د فلم نوم په Mini App کې "
+            "د Search برخه کې ولیکئ.\n\n"
+            "🖼️ همدارنګه کولای شئ د Poster "
+            "له عکس څخه فلم ولټوئ."
         )
 
 
@@ -1517,282 +1233,63 @@ async def finalize_film_submission(
 # SEND FILM
 # =========================================================
 
-async def send_film(
+async def send_film_to_user(
     message: Message,
-    film: Film,
-    compact: bool = False,
+    film_id: int,
 ):
 
-    caption = (
-        f"🎬 <b>{film.title}</b>\n\n"
-    )
+    async with SessionLocal() as session:
 
-    if film.year:
-        caption += (
-            f"📅 کال: <b>{film.year}</b>\n"
-        )
-
-    if film.quality:
-        caption += (
-            f"⚙️ کیفیت: <b>{film.quality}</b>\n"
-        )
-
-    if film.genre:
-        caption += (
-            f"🎭 ژانر: <b>{film.genre}</b>\n"
-        )
-
-    if film.language:
-        caption += (
-            f"🔊 ژبه: <b>{film.language}</b>\n"
-        )
-
-    if film.description:
-        caption += (
-            f"\n📝 {film.description}\n"
-        )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⬇️ فلم ترلاسه کړئ",
-                    callback_data=f"getfilm_{film.id}",
-                )
-            ]
-        ]
-    )
-
-    try:
-
-        # If poster exists, send poster first.
-        if film.poster_file_id:
-
-            await message.answer_photo(
-                photo=film.poster_file_id,
-                caption=caption,
-                reply_markup=keyboard,
+        result = await session.execute(
+            select(Film).where(
+                Film.id == film_id,
+                Film.approved.is_(True),
             )
-
-        else:
-
-            await message.answer(
-                caption,
-                reply_markup=keyboard,
-            )
-
-    except Exception as exc:
-
-        logger.warning(
-            "Unable to send film preview: %s",
-            exc,
         )
 
-
-# =========================================================
-# GET FILM
-# =========================================================
-
-@router.callback_query(
-    F.data.startswith("getfilm_")
-)
-async def get_film_callback(
-    callback: CallbackQuery,
-):
-
-    if not await ensure_callback_access(
-        callback
-    ):
-        return
-
-    await callback.answer(
-        "فلم لېږل کېږي..."
-    )
-
-    try:
-
-        film_id = int(
-            callback.data.split(
-                "_",
-                1,
-            )[1]
-        )
-
-    except Exception:
-
-        await callback.message.answer(
-            "❌ ناسم Film ID."
-        )
-
-        return
-
-    film = await get_film(
-        film_id
-    )
+        film = result.scalar_one_or_none()
 
     if not film:
 
-        await callback.message.answer(
-            "❌ فلم پیدا نه شو."
+        await message.answer(
+            "❌ دا فلم پیدا نه شو."
         )
 
         return
 
+    caption = (
+        f"🎬 <b>{film.title}</b>\n\n"
+        f"📅 کال: {film.year or 'نامعلوم'}\n"
+        f"⚙️ کیفیت: {film.quality or 'نامعلوم'}\n"
+        f"🎭 ژانر: {film.genre or 'نامعلوم'}\n"
+        f"🔊 ژبه: {film.language or 'نامعلوم'}"
+    )
+
     try:
 
-        await callback.message.answer_video(
-            video=film.video_file_id,
-            caption=(
-                f"🎬 <b>{film.title}</b>\n\n"
-                "📥 د ALL PRODUCTION FILMS له خوا"
-            ),
+        await message.answer_photo(
+            photo=film.poster_file_id,
+            caption=caption,
         )
 
     except Exception:
 
-        try:
+        await message.answer(
+            caption
+        )
 
-            await callback.message.answer_document(
-                document=film.video_file_id,
-                caption=(
-                    f"🎬 <b>{film.title}</b>\n\n"
-                    "📥 د ALL PRODUCTION FILMS له خوا"
-                ),
-            )
-
-        except Exception as exc:
-
-            logger.exception(
-                "Film delivery failed: %s",
-                exc,
-            )
-
-            await callback.message.answer(
-                "❌ فلم ونه لېږل شو. "
-                "مهرباني وکړئ وروسته بیا هڅه وکړئ."
-            )
+    await message.answer_document(
+        document=film.video_file_id,
+        caption=(
+            f"🍿 <b>{film.title}</b>\n\n"
+            "⬇️ د فلم ترلاسه کولو لپاره "
+            "پورته فایل Download کړئ."
+        ),
+    )
 
 
 # =========================================================
-# CHANNEL REFERRALS
-# =========================================================
-
-@router.chat_member()
-async def channel_member_update(
-    event: ChatMemberUpdated,
-):
-
-    try:
-
-        main_channel = await get_main_channel()
-
-        event_username = (
-            event.chat.username
-            or ""
-        )
-
-        configured = (
-            main_channel
-            .lstrip("@")
-            .lower()
-        )
-
-        if event_username.lower() != configured:
-
-            return
-
-        old_status = event.old_chat_member.status
-        new_status = event.new_chat_member.status
-
-        was_member = old_status in {
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.CREATOR,
-            ChatMemberStatus.RESTRICTED,
-        }
-
-        is_member = new_status in {
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.CREATOR,
-            ChatMemberStatus.RESTRICTED,
-        }
-
-        if was_member or not is_member:
-            return
-
-        invite_link = None
-
-        if event.invite_link:
-
-            invite_link = (
-                event.invite_link.invite_link
-            )
-
-        if not invite_link:
-
-            # Direct join does not count.
-            logger.info(
-                "Direct join detected; no referral counted."
-            )
-
-            return
-
-        joined_user = (
-            event.new_chat_member.user
-        )
-
-        result = await process_channel_join(
-            inviter_id=None,
-            invited_id=joined_user.id,
-            invite_link=invite_link,
-        )
-
-        logger.info(
-            "Referral join processed: %s",
-            result,
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "Channel member handler failed: %s",
-            exc,
-        )
-
-
-# =========================================================
-# ADMIN NOTIFICATION
-# =========================================================
-
-async def notify_admins_about_film(
-    film: Film,
-):
-
-    for admin_id in settings.admin_ids:
-
-        try:
-
-            await bot.send_message(
-                admin_id,
-                (
-                    "🎬 <b>نوی فلم د تایید لپاره راغلی</b>\n\n"
-                    f"🆔 ID: <code>{film.id}</code>\n"
-                    f"🎬 نوم: <b>{film.title}</b>\n"
-                    f"👤 Uploader: <code>{film.uploader_id}</code>"
-                ),
-            )
-
-        except Exception as exc:
-
-            logger.warning(
-                "Admin notification failed: %s",
-                exc,
-            )
-
-
-# =========================================================
-# ADMIN COMMANDS
+# ADMIN COMMAND
 # =========================================================
 
 @router.message(
@@ -1810,34 +1307,22 @@ async def admin_handler(
     ):
 
         await message.answer(
-            "⛔ تاسو Admin نه یاست."
+            "❌ تاسو Admin نه یاست."
         )
 
         return
 
-    stats = await get_statistics()
-
-    target = await get_referral_target()
-
-    auto_approve = await get_auto_approve()
-
-    main_channel = await get_main_channel()
-
-    access_channel = await get_access_channel()
-
     await message.answer(
-        "🛠 <b>ALL PRODUCTION ADMIN</b>\n\n"
-        f"👥 Users: <b>{stats['users']}</b>\n"
-        f"⭐ Publishers: <b>{stats['publishers']}</b>\n"
-        f"🎬 Films: <b>{stats['films']}</b>\n"
-        f"✅ Approved: <b>{stats['approved_films']}</b>\n"
-        f"📢 Channels: <b>{stats['channels']}</b>\n\n"
-        f"👥 Referral Target: <b>{target}</b>\n"
-        f"🤖 Auto Approve: <b>{auto_approve}</b>\n"
-        f"📢 Main: <code>{main_channel}</code>\n"
-        f"🔐 Access: <code>{access_channel}</code>"
+        "🛠️ <b>ALL PRODUCTION ADMIN</b>\n\n"
+        "Admin Panel:\n"
+        f"{settings.APP_URL}/static/admin.html\n\n"
+        "📊 /stats"
     )
 
+
+# =========================================================
+# STATS
+# =========================================================
 
 @router.message(
     Command("stats")
@@ -1852,92 +1337,189 @@ async def stats_handler(
     if not is_admin(
         message.from_user.id
     ):
+
+        await message.answer(
+            "❌ تاسو Admin نه یاست."
+        )
+
         return
 
-    stats = await get_statistics()
+    try:
 
-    await message.answer(
-        "📊 <b>Statistics</b>\n\n"
-        f"👥 Users: <b>{stats['users']}</b>\n"
-        f"⭐ Publishers: <b>{stats['publishers']}</b>\n"
-        f"🎬 Films: <b>{stats['films']}</b>\n"
-        f"✅ Approved: <b>{stats['approved_films']}</b>\n"
-        f"📢 Channels: <b>{stats['channels']}</b>"
-    )
+        stats = await get_statistics()
+
+        text = (
+            "📊 <b>ALL PRODUCTION STATS</b>\n\n"
+            f"👥 ټول Users: "
+            f"<b>{stats.get('users', 0)}</b>\n"
+            f"🎥 Publishers: "
+            f"<b>{stats.get('publishers', 0)}</b>\n"
+            f"🎬 ټول فلمونه: "
+            f"<b>{stats.get('films', 0)}</b>\n"
+            f"✅ Approved: "
+            f"<b>{stats.get('approved_films', 0)}</b>\n"
+            f"📢 Channels: "
+            f"<b>{stats.get('channels', 0)}</b>"
+        )
+
+        await message.answer(text)
+
+    except Exception as exc:
+
+        logger.exception(
+            "Stats error: %s",
+            exc,
+        )
+
+        await message.answer(
+            "❌ د Stats ترلاسه کولو کې ستونزه راغله."
+        )
 
 
 # =========================================================
-# ERROR HANDLER
+# CHANNEL JOIN TRACKING
+# =========================================================
+
+@router.chat_member()
+async def channel_member_handler(
+    update,
+):
+
+    try:
+
+        chat = update.chat
+
+        main_channel = (
+            await get_main_channel()
+        )
+
+        chat_username = (
+            f"@{chat.username}"
+            if getattr(chat, "username", None)
+            else str(chat.id)
+        )
+
+        if (
+            chat_username.lower()
+            != main_channel.lower()
+        ):
+            return
+
+        new_member = update.new_chat_member
+
+        if not new_member:
+            return
+
+        if new_member.status not in {
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        }:
+            return
+
+        invited_user_id = (
+            new_member.user.id
+        )
+
+        invite_link = None
+
+        if update.invite_link:
+
+            invite_link = (
+                update.invite_link.invite_link
+            )
+
+        result = await process_channel_join(
+            inviter_id=None,
+            invited_id=invited_user_id,
+            invite_link=invite_link,
+        )
+
+        if result:
+
+            inviter_id = result.get(
+                "inviter_id"
+            )
+
+            if inviter_id:
+
+                try:
+
+                    await bot.send_message(
+                        inviter_id,
+                        "🎉 <b>نوی ریفرل!</b>\n\n"
+                        "یو نوی کارن ستاسو "
+                        "د دعوت لینک له لارې "
+                        "چینل ته داخل شو. 👥",
+                    )
+
+                except Exception:
+                    pass
+
+    except Exception as exc:
+
+        logger.exception(
+            "Channel member handler error: %s",
+            exc,
+        )
+
+
+# =========================================================
+# ERROR HANDLING
 # =========================================================
 
 @router.errors()
-async def error_handler(
+async def global_error_handler(
     event,
 ):
 
     logger.exception(
-        "Unhandled bot error: %s",
+        "Unhandled Telegram error: %s",
         event.exception,
     )
 
 
 # =========================================================
-# START BOT
+# BOT START
 # =========================================================
-
-_bot_task = None
-
 
 async def start_bot():
 
-    global _bot_task
-
-    if _bot_task is not None:
-        return
-
-    async def runner():
-
-        while True:
-
-            try:
-
-                logger.info(
-                    "ALL PRODUCTION FILMS bot starting..."
-                )
-
-                await bot.delete_webhook(
-                    drop_pending_updates=False
-                )
-
-                await dp.start_polling(
-                    bot,
-                    allowed_updates=dp.resolve_used_update_types(),
-                )
-
-            except asyncio.CancelledError:
-
-                raise
-
-            except Exception as exc:
-
-                logger.exception(
-                    "Bot polling crashed: %s",
-                    exc,
-                )
-
-                await asyncio.sleep(
-                    5
-                )
-
-    _bot_task = asyncio.create_task(
-        runner()
+    logger.info(
+        "Starting ALL PRODUCTION FILMS bot..."
     )
 
-    await asyncio.sleep(
-        0
-    )
+    try:
+
+        await bot.delete_webhook(
+            drop_pending_updates=False
+        )
+
+    except Exception as exc:
+
+        logger.warning(
+            "Could not delete webhook: %s",
+            exc,
+        )
+
+    try:
+
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
+
+    finally:
+
+        await bot.session.close()
 
 
 # =========================================================
-# END
+# DIRECT RUN
 # =========================================================
+
+if __name__ == "__main__":
+
+    asyncio.run(
+        start_bot()
+)
