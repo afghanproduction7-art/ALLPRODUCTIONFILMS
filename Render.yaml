@@ -1,1 +1,40 @@
+services:
+  - type: web
+    name: all-production-films
+    runtime: python
+    plan: free
 
+    buildCommand: pip install -r requirements.txt
+
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: DATABASE_URL
+        sync: false
+
+      - key: APP_URL
+        sync: false
+
+      - key: WEBHOOK_SECRET
+        sync: false
+
+      - key: ADMIN_IDS
+        sync: false
+
+      - key: BOT_USERNAME
+        value: ALL_PRODUCTION_FILMBOT
+
+      - key: MAIN_CHANNEL
+        value: "@afghanproduction"
+
+      - key: ACCESS_CHANNEL
+        value: "@ALL_PASHTO"
+
+      - key: REFERRAL_TARGET
+        value: "50"
+
+      - key: AUTO_APPROVE_FILMS
+        value: "true"
