@@ -2,7 +2,6 @@
 <html lang="ps" dir="rtl">
 
 <head>
-
     <meta charset="UTF-8">
 
     <meta
@@ -15,7 +14,9 @@
         content="#0b0f19"
     >
 
-    <title>ALL PRODUCTION FILMS</title>
+    <title>
+        ALL PRODUCTION FILMS
+    </title>
 
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
@@ -23,16 +24,65 @@
         rel="stylesheet"
         href="/static/style.css"
     >
-
 </head>
-
 
 <body>
 
-<div id="app">
+<!-- =====================================================
+     ACCESS SCREEN
+===================================================== -->
+
+<div
+    id="accessScreen"
+    class="screen hidden"
+>
+
+    <div class="access-card">
+
+        <div class="access-logo">
+            🎬
+        </div>
+
+        <h1>
+            ALL PRODUCTION FILMS
+        </h1>
+
+        <p>
+            د فلمونو د ترلاسه کولو لپاره
+            لومړی زموږ اړین چینل Join کړئ.
+        </p>
+
+        <button
+            id="joinChannelBtn"
+            class="primary-btn"
+        >
+            📢 چینل Join کړئ
+        </button>
+
+        <button
+            class="secondary-btn"
+            onclick="location.reload()"
+        >
+            🔄 بیا وګورئ
+        </button>
+
+    </div>
+
+</div>
 
 
-    <!-- ================= HEADER ================= -->
+<!-- =====================================================
+     MAIN APP
+===================================================== -->
+
+<div
+    id="mainApp"
+    class="app hidden"
+>
+
+    <!-- =================================================
+         HEADER
+    ================================================= -->
 
     <header class="top-header">
 
@@ -42,7 +92,7 @@
                 🎬
             </div>
 
-            <div class="brand-text">
+            <div>
 
                 <h1>
                     ALL PRODUCTION
@@ -56,55 +106,269 @@
 
         </div>
 
-
-        <button
-            id="refreshBtn"
-            class="icon-btn"
-            onclick="refreshApp()"
-        >
-            🔄
-        </button>
-
     </header>
 
 
+    <!-- =================================================
+         USER CARD
+    ================================================= -->
 
-    <!-- ================= ACCESS SCREEN ================= -->
+    <section class="user-card">
 
-    <section
-        id="accessScreen"
-        class="screen hidden"
-    >
+        <div class="user-avatar">
+            👤
+        </div>
 
-        <div class="access-box">
+        <div class="user-info">
 
-            <div class="access-icon">
-                🔐
-            </div>
+            <h2 id="userName">
+                کارن
+            </h2>
 
-            <h2>
-                چینل ته داخل شئ
+            <p id="userUsername">
+                @username
+            </p>
+
+        </div>
+
+    </section>
+
+
+    <!-- =================================================
+         WELCOME
+    ================================================= -->
+
+    <section class="welcome-card">
+
+        <div>
+
+            <small>
+                ښه راغلاست 👋
+            </small>
+
+            <h2 id="welcomeName">
+                کارن
             </h2>
 
             <p>
-                د فلمونو د لیدلو او ترلاسه کولو لپاره
-                لومړی زموږ اړین چینل Join کړئ.
+                د پښتو فلمونو لویه نړۍ
+                له تاسو سره.
             </p>
 
-            <a
-                id="joinAccessBtn"
-                class="primary-btn"
-                href="https://t.me/ALL_PASHTO"
-                target="_blank"
+        </div>
+
+        <div class="welcome-icon">
+            🍿
+        </div>
+
+    </section>
+
+
+    <!-- =================================================
+         SEARCH
+    ================================================= -->
+
+    <section class="search-section">
+
+        <div class="search-box">
+
+            <span>
+                🔎
+            </span>
+
+            <input
+                id="searchInput"
+                type="search"
+                placeholder="د فلم نوم ولټوئ..."
+                autocomplete="off"
             >
-                📢 چینل Join کړئ
-            </a>
+
+        </div>
+
+        <button
+            id="imageSearchBtn"
+            class="image-search-btn"
+            title="د عکس له لارې لټون"
+        >
+            🖼️
+        </button>
+
+        <input
+            id="imageSearchInput"
+            type="file"
+            accept="image/*"
+            hidden
+        >
+
+    </section>
+
+
+    <!-- =================================================
+         QUICK MENU
+    ================================================= -->
+
+    <section class="quick-menu">
+
+        <button
+            class="quick-card"
+            onclick="loadOfficial()"
+        >
+
+            <div class="quick-icon">
+                ⭐
+            </div>
+
+            <span>
+                رسمي فلمونه
+            </span>
+
+        </button>
+
+
+        <button
+            class="quick-card"
+            onclick="loadCategory('پښتو')"
+        >
+
+            <div class="quick-icon">
+                🔊
+            </div>
+
+            <span>
+                پښتو
+            </span>
+
+        </button>
+
+
+        <button
+            class="quick-card"
+            onclick="loadCategory('عاشقانه')"
+        >
+
+            <div class="quick-icon">
+                ❤️
+            </div>
+
+            <span>
+                عاشقانه
+            </span>
+
+        </button>
+
+
+        <button
+            class="quick-card"
+            onclick="loadCategory('مسخراچي')"
+        >
+
+            <div class="quick-icon">
+                😂
+            </div>
+
+            <span>
+                مسخراچي
+            </span>
+
+        </button>
+
+    </section>
+
+
+    <!-- =================================================
+         REFERRAL CARD
+    ================================================= -->
+
+    <section class="referral-card">
+
+        <div class="section-heading">
+
+            <div>
+
+                <span class="eyebrow">
+                    👥 دعوت وکړئ
+                </span>
+
+                <h2>
+                    خپل ملګري راوبلئ
+                </h2>
+
+            </div>
+
+            <div class="referral-icon">
+                🎁
+            </div>
+
+        </div>
+
+
+        <p class="referral-description">
+
+            خپل ځانګړی لینک شریک کړئ،
+            ملګري مو راوبلئ او د فلم
+            نشرولو اجازه ترلاسه کړئ.
+
+        </p>
+
+
+        <div class="referral-progress-wrapper">
+
+            <div class="referral-numbers">
+
+                <span>
+                    ریفرل:
+                    <strong id="referralCount">
+                        0
+                    </strong>
+                </span>
+
+                <span>
+                    هدف:
+                    <strong id="referralTarget">
+                        50
+                    </strong>
+                </span>
+
+            </div>
+
+
+            <div class="progress-bar">
+
+                <div
+                    id="referralProgress"
+                    class="progress-fill"
+                    style="width: 0%"
+                ></div>
+
+            </div>
+
+
+            <div class="remaining-text">
+
+                پاتې:
+                <strong id="referralRemaining">
+                    50
+                </strong>
+
+            </div>
+
+        </div>
+
+
+        <div class="referral-actions">
 
             <button
+                id="copyReferralBtn"
                 class="secondary-btn"
-                onclick="checkAccess()"
             >
-                ✅ ما Join کړی، بیا یې وګوره
+                📋 لینک کاپي
+            </button>
+
+            <button
+                id="shareReferralBtn"
+                class="primary-btn"
+            >
+                📤 شریکول
             </button>
 
         </div>
@@ -112,476 +376,129 @@
     </section>
 
 
+    <!-- =================================================
+         PUBLISH STATUS
+    ================================================= -->
 
-    <!-- ================= MAIN APP ================= -->
+    <section class="publish-card">
 
-    <main
-        id="mainApp"
-        class="hidden"
-    >
+        <div class="publish-icon">
+            🎬
+        </div>
 
+        <div class="publish-content">
 
-        <!-- USER CARD -->
+            <h3>
+                د فلم نشرول
+            </h3>
 
-        <section class="user-card">
-
-            <div class="user-avatar">
-                👤
-            </div>
-
-            <div class="user-info">
-
-                <strong id="userName">
-                    کارن
-                </strong>
-
-                <span>
-                    ALL PRODUCTION FILMS
-                </span>
-
-            </div>
-
-        </section>
-
-
-
-        <!-- ================= SEARCH ================= -->
-
-        <section class="search-section">
-
-            <div class="search-box">
-
-                <span class="search-icon">
-                    🔍
-                </span>
-
-                <input
-                    id="searchInput"
-                    type="search"
-                    placeholder="د فلم نوم ولیکئ..."
-                    autocomplete="off"
-                >
-
-                <button
-                    id="searchBtn"
-                    onclick="searchFilms()"
-                >
-                    لټون
-                </button>
-
-            </div>
-
-        </section>
-
-
-
-        <!-- ================= QUICK MENU ================= -->
-
-        <section class="quick-menu">
-
-            <button
-                class="quick-card"
-                onclick="loadLatestFilms()"
-            >
-
-                <span>
-                    🆕
-                </span>
-
-                <strong>
-                    نوي فلمونه
-                </strong>
-
-            </button>
-
-
-            <button
-                class="quick-card"
-                onclick="loadOfficialFilms()"
-            >
-
-                <span>
-                    ⭐
-                </span>
-
-                <strong>
-                    زموږ فلمونه
-                </strong>
-
-            </button>
-
-
-            <button
-                class="quick-card"
-                onclick="loadCategory('pashto')"
-            >
-
-                <span>
-                    🎙️
-                </span>
-
-                <strong>
-                    پښتو فلمونه
-                </strong>
-
-            </button>
-
-
-            <button
-                class="quick-card"
-                onclick="showReferralSection()"
-            >
-
-                <span>
-                    👥
-                </span>
-
-                <strong>
-                    دعوتونه
-                </strong>
-
-            </button>
-
-        </section>
-
-
-
-        <!-- ================= REFERRAL CARD ================= -->
-
-        <section
-            id="referralSection"
-            class="referral-card hidden"
-        >
-
-            <div class="section-heading">
-
-                <h2>
-                    👥 د ملګرو دعوت
-                </h2>
-
-                <button
-                    class="close-btn"
-                    onclick="hideReferralSection()"
-                >
-                    ✕
-                </button>
-
-            </div>
-
-
-            <div class="referral-progress">
-
-                <div class="progress-info">
-
-                    <span>
-                        ستا دعوتونه
-                    </span>
-
-                    <strong id="referralCount">
-                        0 / 50
-                    </strong>
-
-                </div>
-
-
-                <div class="progress-bar">
-
-                    <div
-                        id="referralProgress"
-                        class="progress-fill"
-                    ></div>
-
-                </div>
-
-            </div>
-
-
-            <p
-                id="referralStatus"
-                class="referral-status"
-            >
-                د خپرولو اجازه ترلاسه کولو لپاره
-                خپل ملګري دعوت کړئ.
+            <p id="publishStatus">
+                🔒 د نشر لپاره ریفرل بشپړ کړئ
             </p>
 
-
-            <div class="referral-actions">
-
-                <button
-                    class="primary-btn"
-                    onclick="copyReferralLink()"
-                >
-                    📋 لینک کاپي
-                </button>
-
-                <button
-                    class="secondary-btn"
-                    onclick="shareReferralLink()"
-                >
-                    📤 شریکول
-                </button>
-
-            </div>
+        </div>
 
 
-            <div class="referral-link-box">
-
-                <span id="referralLink">
-                    ---
-                </span>
-
-            </div>
-
-        </section>
-
-
-
-        <!-- ================= PUBLISH STATUS ================= -->
-
-        <section
-            id="publishCard"
-            class="publish-card"
+        <button
+            id="publishBtn"
+            class="publish-button"
         >
+            نشر
+        </button>
 
-            <div class="publish-icon">
-                🎬
-            </div>
-
-            <div class="publish-info">
-
-                <strong>
-                    فلم خپرول
-                </strong>
-
-                <span id="publishStatus">
-                    د خپرولو لپاره ۵۰ دعوتونه پکار دي.
-                </span>
-
-            </div>
-
-        </section>
+    </section>
 
 
+    <!-- =================================================
+         SECTION TITLE
+    ================================================= -->
 
-        <!-- ================= FILM AREA ================= -->
+    <div class="section-title-row">
 
-        <section class="films-section">
+        <h2 id="sectionTitle">
+            وروستي فلمونه
+        </h2>
 
-            <div class="section-heading">
-
-                <h2 id="filmsTitle">
-                    🎬 نوي فلمونه
-                </h2>
-
-                <button
-                    id="leadersBtn"
-                    class="small-btn"
-                    onclick="showLeaders()"
-                >
-                    🏆 مشران
-                </button>
-
-            </div>
-
-
-            <div
-                id="loading"
-                class="loading hidden"
-            >
-
-                <div class="spinner"></div>
-
-                <span>
-                    لږ صبر وکړئ...
-                </span>
-
-            </div>
-
-
-            <div
-                id="emptyState"
-                class="empty-state hidden"
-            >
-
-                <div>
-                    🎬
-                </div>
-
-                <h3>
-                    فلم ونه موندل شو
-                </h3>
-
-                <p>
-                    بل نوم یا بله کلمه وازمویئ.
-                </p>
-
-            </div>
-
-
-            <div
-                id="filmsGrid"
-                class="films-grid"
-            ></div>
-
-        </section>
-
-
-
-        <!-- ================= CHANNELS ================= -->
-
-        <section class="channels-section">
-
-            <div class="section-heading">
-
-                <h2>
-                    📢 زموږ چینلونه
-                </h2>
-
-            </div>
-
-
-            <div
-                id="channelsList"
-                class="channels-list"
-            ></div>
-
-        </section>
-
-
-    </main>
-
-
-
-    <!-- ================= FILM MODAL ================= -->
-
-    <div
-        id="filmModal"
-        class="modal hidden"
-    >
-
-        <div class="modal-overlay"
-             onclick="closeFilmModal()">
-        </div>
-
-        <div class="modal-content">
-
-            <button
-                class="modal-close"
-                onclick="closeFilmModal()"
-            >
-                ✕
-            </button>
-
-
-            <div
-                id="modalPoster"
-                class="modal-poster"
-            ></div>
-
-
-            <div class="modal-body">
-
-                <h2 id="modalTitle">
-                    فلم
-                </h2>
-
-
-                <div
-                    id="modalMeta"
-                    class="film-meta"
-                ></div>
-
-
-                <p
-                    id="modalDescription"
-                    class="modal-description"
-                ></p>
-
-
-                <button
-                    id="downloadBtn"
-                    class="download-btn"
-                >
-                    ⬇️ فلم ترلاسه کړئ
-                </button>
-
-            </div>
-
-        </div>
+        <button
+            onclick="loadLatest()"
+            class="refresh-btn"
+            title="Refresh"
+        >
+            🔄
+        </button>
 
     </div>
 
 
+    <!-- =================================================
+         FILMS
+    ================================================= -->
 
-    <!-- ================= LEADERS MODAL ================= -->
-
-    <div
-        id="leadersModal"
-        class="modal hidden"
+    <section
+        id="filmsGrid"
+        class="films-grid"
     >
+
+        <div class="loading-state">
+
+            <div class="loader">
+                ⏳
+            </div>
+
+            <p>
+                فلمونه پورته کېږي...
+            </p>
+
+        </div>
+
+    </section>
+
+
+    <!-- =================================================
+         CHANNELS
+    ================================================= -->
+
+    <section class="channels-section">
+
+        <div class="section-title-row">
+
+            <h2>
+                📢 زموږ چینلونه
+            </h2>
+
+        </div>
+
 
         <div
-            class="modal-overlay"
-            onclick="closeLeaders()"
+            id="channelsList"
+            class="channels-list"
         >
-        </div>
 
-        <div class="modal-content leaders-content">
-
-            <button
-                class="modal-close"
-                onclick="closeLeaders()"
-            >
-                ✕
-            </button>
-
-
-            <div class="leaders-header">
-
-                <div>
-                    🏆
-                </div>
-
-                <h2>
-                    د دعوتونو مشران
-                </h2>
-
-                <p>
-                    تر ټولو ډېر فعال دعوت کوونکي
-                </p>
-
+            <div class="loading-state">
+                ⏳
             </div>
 
-
-            <div
-                id="leadersList"
-                class="leaders-list"
-            ></div>
-
         </div>
 
-    </div>
+    </section>
 
 
+    <!-- =================================================
+         FOOTER SPACE
+    ================================================= -->
 
-    <!-- ================= TOAST ================= -->
-
-    <div
-        id="toast"
-        class="toast hidden"
-    >
-        <span id="toastMessage"></span>
-    </div>
+    <div class="bottom-space"></div>
 
 
-
-    <!-- ================= BOTTOM NAV ================= -->
+    <!-- =================================================
+         BOTTOM NAV
+    ================================================= -->
 
     <nav class="bottom-nav">
 
         <button
-            class="nav-item active"
-            onclick="loadLatestFilms()"
+            data-view="home"
+            class="active"
         >
 
             <span>
@@ -596,40 +513,22 @@
 
 
         <button
-            class="nav-item"
-            onclick="searchInputFocus()"
+            data-view="official"
         >
 
             <span>
-                🔍
+                ⭐
             </span>
 
             <small>
-                لټون
+                رسمي
             </small>
 
         </button>
 
 
         <button
-            class="nav-item"
-            onclick="showReferralSection()"
-        >
-
-            <span>
-                👥
-            </span>
-
-            <small>
-                دعوت
-            </small>
-
-        </button>
-
-
-        <button
-            class="nav-item"
-            onclick="showLeaders()"
+            data-view="leaders"
         >
 
             <span>
@@ -642,12 +541,60 @@
 
         </button>
 
-    </nav>
 
+        <button
+            data-view="home"
+            onclick="loadChannels()"
+        >
+
+            <span>
+                📢
+            </span>
+
+            <small>
+                چینلونه
+            </small>
+
+        </button>
+
+    </nav>
 
 </div>
 
 
+<!-- =====================================================
+     FILM MODAL
+===================================================== -->
+
+<div
+    id="filmModal"
+    class="modal"
+></div>
+
+
+<!-- =====================================================
+     LEADERS MODAL
+===================================================== -->
+
+<div
+    id="leadersModal"
+    class="modal"
+></div>
+
+
+<!-- =====================================================
+     TOAST
+===================================================== -->
+
+<div
+    id="toast"
+    class="toast"
+></div>
+
+
+<!-- =====================================================
+     JAVASCRIPT
+===================================================== -->
 
 <script src="/static/app.js"></script>
 
