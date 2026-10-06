@@ -1,1 +1,736 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
 
+:root {
+    --bg: #0b0f14;
+    --card: #121821;
+    --card2: #171f2a;
+    --border: #273241;
+    --text: #ffffff;
+    --muted: #9aa7b5;
+    --accent: #35c7ff;
+    --green: #35d07f;
+    --red: #ff5d6c;
+    --yellow: #ffc857;
+}
+
+body {
+    font-family:
+        Arial,
+        "Noto Sans Arabic",
+        sans-serif;
+
+    background: var(--bg);
+    color: var(--text);
+
+    min-height: 100vh;
+
+    direction: rtl;
+}
+
+button,
+input,
+select {
+    font-family: inherit;
+}
+
+button {
+    cursor: pointer;
+}
+
+.app {
+    width: 100%;
+    max-width: 900px;
+
+    margin: 0 auto;
+
+    padding: 16px;
+}
+
+
+/* =========================================
+   HEADER
+========================================= */
+
+.header {
+    display: flex;
+
+    align-items: center;
+    justify-content: space-between;
+
+    background: linear-gradient(
+        135deg,
+        #111a25,
+        #182433
+    );
+
+    border: 1px solid var(--border);
+
+    border-radius: 18px;
+
+    padding: 18px;
+
+    margin-bottom: 20px;
+
+    box-shadow:
+        0 10px 35px
+        rgba(0, 0, 0, 0.25);
+}
+
+.header h1 {
+    font-size: 20px;
+
+    margin-bottom: 5px;
+}
+
+.header p {
+    color: var(--muted);
+
+    font-size: 13px;
+}
+
+.refresh-btn {
+    width: 44px;
+    height: 44px;
+
+    border: 1px solid var(--border);
+
+    border-radius: 12px;
+
+    background: var(--card2);
+
+    color: white;
+
+    font-size: 20px;
+}
+
+
+/* =========================================
+   SECTIONS
+========================================= */
+
+section {
+    margin-bottom: 24px;
+}
+
+.section-title {
+    font-size: 18px;
+
+    margin-bottom: 12px;
+
+    font-weight: 700;
+}
+
+.section-header {
+    display: flex;
+
+    align-items: center;
+    justify-content: space-between;
+
+    margin-bottom: 12px;
+}
+
+
+/* =========================================
+   CARD
+========================================= */
+
+.card {
+    background: var(--card);
+
+    border: 1px solid var(--border);
+
+    border-radius: 16px;
+
+    padding: 16px;
+
+    margin-bottom: 12px;
+}
+
+.card h3 {
+    font-size: 16px;
+
+    margin-bottom: 15px;
+}
+
+
+/* =========================================
+   STATISTICS
+========================================= */
+
+.stats-grid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(2, 1fr);
+
+    gap: 10px;
+}
+
+.stat-card {
+    background: var(--card);
+
+    border: 1px solid var(--border);
+
+    border-radius: 16px;
+
+    padding: 15px;
+
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 5px;
+
+    min-height: 105px;
+}
+
+.stat-card span {
+    font-size: 22px;
+}
+
+.stat-card strong {
+    font-size: 24px;
+}
+
+.stat-card small {
+    color: var(--muted);
+
+    font-size: 12px;
+}
+
+
+/* =========================================
+   INPUTS
+========================================= */
+
+label {
+    display: block;
+
+    color: #dce4ec;
+
+    font-size: 13px;
+
+    margin-bottom: 7px;
+
+    margin-top: 15px;
+}
+
+input,
+select {
+    width: 100%;
+
+    background: #0d131b;
+
+    color: white;
+
+    border: 1px solid var(--border);
+
+    border-radius: 11px;
+
+    padding: 12px;
+
+    outline: none;
+
+    font-size: 14px;
+
+    direction: ltr;
+
+    text-align: left;
+}
+
+input:focus,
+select:focus {
+    border-color: var(--accent);
+
+    box-shadow:
+        0 0 0 2px
+        rgba(53, 199, 255, 0.1);
+}
+
+select {
+    margin-top: 10px;
+}
+
+.input-row {
+    position: relative;
+}
+
+.input-suffix {
+    position: absolute;
+
+    left: 12px;
+
+    top: 50%;
+
+    transform: translateY(-50%);
+
+    color: var(--muted);
+
+    font-size: 12px;
+
+    pointer-events: none;
+}
+
+.input-row input {
+    padding-left: 85px;
+}
+
+
+/* =========================================
+   SWITCH
+========================================= */
+
+.switch-row {
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 10px;
+
+    cursor: pointer;
+}
+
+.switch-row input {
+    display: none;
+}
+
+.switch {
+    position: relative;
+
+    width: 48px;
+    height: 26px;
+
+    background: #303a46;
+
+    border-radius: 20px;
+
+    transition: 0.2s;
+}
+
+.switch::after {
+    content: "";
+
+    position: absolute;
+
+    width: 20px;
+    height: 20px;
+
+    top: 3px;
+    right: 3px;
+
+    background: white;
+
+    border-radius: 50%;
+
+    transition: 0.2s;
+}
+
+.switch-row input:checked + .switch {
+    background: var(--green);
+}
+
+.switch-row input:checked + .switch::after {
+    transform: translateX(-22px);
+}
+
+
+/* =========================================
+   BUTTONS
+========================================= */
+
+.primary-btn {
+    width: 100%;
+
+    border: none;
+
+    border-radius: 12px;
+
+    background: var(--accent);
+
+    color: #061018;
+
+    font-weight: 700;
+
+    padding: 13px;
+
+    margin-top: 15px;
+
+    font-size: 14px;
+
+    transition: 0.2s;
+}
+
+.primary-btn:active {
+    transform: scale(0.98);
+}
+
+.small-btn {
+    border: 1px solid var(--border);
+
+    border-radius: 10px;
+
+    background: var(--card2);
+
+    color: white;
+
+    padding: 8px 12px;
+
+    font-size: 12px;
+}
+
+.danger-btn {
+    border: none;
+
+    background: var(--red);
+
+    color: white;
+
+    border-radius: 9px;
+
+    padding: 8px 11px;
+
+    font-size: 12px;
+}
+
+.success-btn {
+    border: none;
+
+    background: var(--green);
+
+    color: #07140d;
+
+    border-radius: 9px;
+
+    padding: 8px 11px;
+
+    font-size: 12px;
+
+    font-weight: 700;
+}
+
+.warning-btn {
+    border: none;
+
+    background: var(--yellow);
+
+    color: #171106;
+
+    border-radius: 9px;
+
+    padding: 8px 11px;
+
+    font-size: 12px;
+
+    font-weight: 700;
+}
+
+
+/* =========================================
+   LIST
+========================================= */
+
+.list {
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 10px;
+}
+
+.list-item {
+    background: var(--card);
+
+    border: 1px solid var(--border);
+
+    border-radius: 15px;
+
+    padding: 13px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 12px;
+}
+
+.list-info {
+    min-width: 0;
+
+    flex: 1;
+}
+
+.list-title {
+    font-weight: 700;
+
+    font-size: 14px;
+
+    margin-bottom: 5px;
+
+    word-break: break-word;
+}
+
+.list-meta {
+    color: var(--muted);
+
+    font-size: 11px;
+
+    line-height: 1.7;
+
+    direction: ltr;
+
+    text-align: left;
+}
+
+.list-actions {
+    display: flex;
+
+    align-items: center;
+
+    gap: 6px;
+
+    flex-wrap: wrap;
+
+    justify-content: flex-end;
+}
+
+
+/* =========================================
+   FILM ITEM
+========================================= */
+
+.film-item {
+    display: flex;
+
+    align-items: flex-start;
+
+    gap: 12px;
+}
+
+.film-poster {
+    width: 65px;
+    height: 88px;
+
+    object-fit: cover;
+
+    border-radius: 9px;
+
+    background: #0a0e13;
+
+    border: 1px solid var(--border);
+
+    flex-shrink: 0;
+}
+
+.film-info {
+    flex: 1;
+
+    min-width: 0;
+}
+
+.film-title {
+    font-weight: 700;
+
+    font-size: 14px;
+
+    margin-bottom: 5px;
+
+    line-height: 1.5;
+}
+
+.film-meta {
+    color: var(--muted);
+
+    font-size: 11px;
+
+    line-height: 1.8;
+}
+
+.film-status {
+    display: inline-block;
+
+    padding: 4px 7px;
+
+    border-radius: 7px;
+
+    font-size: 10px;
+
+    margin-top: 5px;
+}
+
+.status-approved {
+    background: rgba(
+        53,
+        208,
+        127,
+        0.15
+    );
+
+    color: var(--green);
+}
+
+.status-pending {
+    background: rgba(
+        255,
+        200,
+        87,
+        0.15
+    );
+
+    color: var(--yellow);
+}
+
+.status-rejected {
+    background: rgba(
+        255,
+        93,
+        108,
+        0.15
+    );
+
+    color: var(--red);
+}
+
+
+/* =========================================
+   MESSAGE
+========================================= */
+
+.message {
+    min-height: 18px;
+
+    color: var(--green);
+
+    font-size: 12px;
+
+    text-align: center;
+
+    margin-top: 10px;
+}
+
+
+/* =========================================
+   ERROR
+========================================= */
+
+.error-icon {
+    font-size: 45px;
+
+    margin-bottom: 12px;
+}
+
+#errorMessage {
+    color: var(--red);
+}
+
+
+/* =========================================
+   HIDDEN
+========================================= */
+
+.hidden {
+    display: none !important;
+}
+
+
+/* =========================================
+   LOADING
+========================================= */
+
+.loading {
+    text-align: center;
+
+    color: var(--muted);
+
+    padding: 25px;
+
+    font-size: 13px;
+}
+
+
+/* =========================================
+   EMPTY
+========================================= */
+
+.empty {
+    text-align: center;
+
+    color: var(--muted);
+
+    background: var(--card);
+
+    border: 1px dashed var(--border);
+
+    border-radius: 14px;
+
+    padding: 25px;
+
+    font-size: 13px;
+}
+
+
+/* =========================================
+   MOBILE
+========================================= */
+
+@media (max-width: 480px) {
+
+    .app {
+        padding: 11px;
+    }
+
+    .header {
+        padding: 14px;
+    }
+
+    .header h1 {
+        font-size: 17px;
+    }
+
+    .stats-grid {
+        gap: 8px;
+    }
+
+    .stat-card {
+        padding: 12px;
+    }
+
+    .stat-card strong {
+        font-size: 21px;
+    }
+
+    .list-item {
+        align-items: flex-start;
+    }
+
+    .list-actions {
+        flex-direction: column;
+    }
+
+    .film-poster {
+        width: 58px;
+        height: 80px;
+    }
+
+}
+
+
+/* =========================================
+   DESKTOP
+========================================= */
+
+@media (min-width: 700px) {
+
+    .stats-grid {
+        grid-template-columns:
+            repeat(4, 1fr);
+    }
+
+}
