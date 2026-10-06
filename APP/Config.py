@@ -2,35 +2,40 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    bot_token: str
-    database_url: str
-    app_url: str
-    webhook_secret: str
-    admin_ids: str = ""
+    BOT_TOKEN: str
+    DATABASE_URL: str
 
-    # اصلي چینل — د 50 کسانو Referral لپاره
-    main_channel: str = "@afghanproduction"
+    APP_URL: str
+    WEBHOOK_SECRET: str
 
-    # د Bot او Mini App د استعمال اجباري چینل
-    access_channel: str = "@ALL_PASHTO"
+    ADMIN_IDS: str = ""
 
-    # د فلم نشرولو شرط
-    referral_target: int = 50
+    BOT_USERNAME: str = "ALL_PRODUCTION_FILMBOT"
 
-    bot_username: str = "ALL_PRODUCTION_FILMBOT"
+    MAIN_CHANNEL: str = "@afghanproduction"
+    ACCESS_CHANNEL: str = "@ALL_PASHTO"
+
+    REFERRAL_TARGET: int = 50
+
+    AUTO_APPROVE_FILMS: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
+        case_sensitive=True,
         extra="ignore"
     )
 
     @property
-    def admins(self) -> set[int]:
-        return {
-            int(x.strip())
-            for x in self.admin_ids.split(",")
-            if x.strip().isdigit()
-        }
+    def admin_ids(self) -> set[int]:
+        result = set()
+
+        for value in self.ADMIN_IDS.split(","):
+            value = value.strip()
+
+            if value.isdigit():
+                result.add(int(value))
+
+        return result
 
 
 settings = Settings()
