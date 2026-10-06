@@ -1,295 +1,169 @@
-<!doctype html>
-
+<!DOCTYPE html>
 <html lang="ps" dir="rtl">
-
 <head>
+    <meta charset="UTF-8">
 
-<meta charset="utf-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
 
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1"
->
+    <title>ALL PRODUCTION FILMS</title>
 
-<title>
-ALL PRODUCTION FILMS
-</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-
-<style>
-
-body{
-font-family:system-ui;
-background:#f5f5f5;
-margin:0;
-padding:16px;
-}
-
-.card{
-max-width:700px;
-margin:auto;
-background:white;
-border-radius:18px;
-padding:20px;
-box-sizing:border-box;
-}
-
-button,
-input{
-
-width:100%;
-padding:14px;
-margin:6px 0;
-border-radius:12px;
-border:1px solid #ddd;
-font-size:16px;
-box-sizing:border-box;
-
-}
-
-button{
-cursor:pointer;
-}
-
-.hidden{
-display:none;
-}
-
-.ok{
-
-background:#eefbea;
-padding:12px;
-border-radius:12px;
-
-}
-
-.warn{
-
-background:#fff4df;
-padding:12px;
-border-radius:12px;
-
-}
-
-.film{
-
-padding:12px;
-border:1px solid #eee;
-border-radius:14px;
-margin:8px 0;
-
-}
-
-</style>
-
+    <link
+        rel="stylesheet"
+        href="/static/style.css"
+    >
 </head>
-
 
 <body>
 
+<div class="app">
 
-<div class="card">
+    <header class="header">
 
-<h2>
-🎬 ALL PRODUCTION FILMS
-</h2>
+        <div>
+            <h1>🎬 ALL PRODUCTION</h1>
+            <p>Films Mini App</p>
+        </div>
+
+        <div class="user-avatar" id="userAvatar">
+            👤
+        </div>
+
+    </header>
 
 
-<div id="gate" class="warn">
+    <section class="welcome">
 
-⏳ د Telegram غړیتوب تاییدېږي...
+        <h2 id="welcomeTitle">
+            🎬 ښه راغلاست!
+        </h2>
+
+        <p>
+            خپل خوښ فلم په اسانۍ پیدا کړئ.
+        </p>
+
+    </section>
+
+
+    <section class="search-box">
+
+        <input
+            id="searchInput"
+            type="text"
+            placeholder="🔎 د فلم نوم ولیکئ..."
+        >
+
+        <button
+            id="searchButton"
+            onclick="searchFilms()"
+        >
+            لټون
+        </button>
+
+    </section>
+
+
+    <section class="quick-actions">
+
+        <button onclick="showCategory('pashto')">
+            🎬
+            <span>پښتو ترجمه</span>
+        </button>
+
+        <button onclick="showOfficial()">
+            📢
+            <span>زموږ فلمونه</span>
+        </button>
+
+        <button onclick="showReferral()">
+            👥
+            <span>Referral</span>
+        </button>
+
+        <button onclick="showLeaders()">
+            🏆
+            <span>مشران</span>
+        </button>
+
+    </section>
+
+
+    <section class="content">
+
+        <div class="section-title">
+
+            <h2 id="sectionTitle">
+                🎬 وروستي فلمونه
+            </h2>
+
+        </div>
+
+
+        <div
+            id="loading"
+            class="loading hidden"
+        >
+            ⏳ لږ انتظار...
+        </div>
+
+
+        <div
+            id="results"
+            class="film-grid"
+        ></div>
+
+
+        <div
+            id="empty"
+            class="empty hidden"
+        >
+            😔 فلم پیدا نه شو.
+        </div>
+
+    </section>
+
+
+    <div
+        id="modal"
+        class="modal hidden"
+    >
+
+        <div class="modal-content">
+
+            <button
+                class="close"
+                onclick="closeModal()"
+            >
+                ✕
+            </button>
+
+            <div id="modalBody"></div>
+
+        </div>
+
+    </div>
+
+
+    <footer>
+
+        <p>
+            🎬 ALL PRODUCTION FILMS
+        </p>
+
+        <small>
+            © 2026
+        </small>
+
+    </footer>
 
 </div>
 
 
-<div id="app" class="hidden">
-
-<input
-id="q"
-placeholder="د فلم نوم ولیکئ..."
->
-
-<button id="searchBtn">
-
-🔎 فلم ولټوه
-
-</button>
-
-
-<div id="out"></div>
-
-</div>
-
-</div>
-
-
-<script>
-
-
-const tg =
-window.Telegram &&
-window.Telegram.WebApp;
-
-
-if(tg){
-
-tg.ready();
-
-tg.expand();
-
-}
-
-
-const gate =
-document.getElementById("gate");
-
-
-const app =
-document.getElementById("app");
-
-
-const out =
-document.getElementById("out");
-
-
-async function checkAccess(){
-
-
-if(
-!tg ||
-!tg.initData
-){
-
-gate.innerHTML =
-"❌ Mini App باید د Telegram له دننه خلاص شي.";
-
-return;
-
-}
-
-
-try{
-
-
-const response =
-await fetch(
-"/api/miniapp/access",
-{
-
-method:"POST",
-
-headers:{
-"Content-Type":
-"application/json"
-},
-
-body:JSON.stringify({
-
-initData:
-tg.initData
-
-})
-
-}
-);
-
-
-const data =
-await response.json();
-
-
-if(!response.ok){
-
-throw new Error();
-
-}
-
-
-if(!data.allowed){
-
-
-gate.innerHTML =
-
-`🔒 لومړی زموږ چینل Join کړه:
-
-<br><br>
-
-<a
-href="${data.channel_url}"
-target="_blank"
->
-
-📢 ${data.channel}
-
-</a>
-
-<br><br>
-
-<button id="retry">
-
-✅ Join مې وکړ، بیا وګوره
-
-</button>`;
-
-
-document
-.getElementById("retry")
-.onclick =
-checkAccess;
-
-
-return;
-
-}
-
-
-gate.className =
-"ok";
-
-
-gate.textContent =
-"✅ چینل تایید شو؛ Mini App ته ښه راغلاست!";
-
-
-app.className =
-"";
-
-
-}catch(error){
-
-
-gate.textContent =
-
-"❌ د Telegram حساب تایید نه شو. Mini App له Telegram څخه بیا خلاص کړه.";
-
-}
-
-}
-
-
-document
-.getElementById("searchBtn")
-.onclick =
-function(){
-
-out.innerHTML =
-
-'<div class="film">' +
-
-'🔎 Search سیستم به دلته وصل شي.' +
-
-'</div>';
-
-};
-
-
-checkAccess();
-
-
-</script>
-
+<script src="/static/app.js"></script>
 
 </body>
-
 </html>
