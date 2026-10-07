@@ -3,8 +3,11 @@ const tg = window.Telegram?.WebApp;
 if (tg) {
     tg.ready();
     tg.expand();
-    tg.setHeaderColor("#0b0f19");
-    tg.setBackgroundColor("#0b0f19");
+
+    try {
+        tg.setHeaderColor("#0b0f19");
+        tg.setBackgroundColor("#0b0f19");
+    } catch {}
 }
 
 const initData = tg?.initData || "";
@@ -23,15 +26,29 @@ const state = {
 // DOM
 // =========================================================
 
-const $ = (id) => document.getElementById(id);
+const $ = (id) =>
+    document.getElementById(id);
 
-const accessScreen = $("accessScreen");
-const mainApp = $("mainApp");
-const filmsGrid = $("filmsGrid");
-const searchInput = $("searchInput");
-const filmModal = $("filmModal");
-const leadersModal = $("leadersModal");
-const toastBox = $("toast");
+const accessScreen =
+    $("accessScreen");
+
+const mainApp =
+    $("mainApp");
+
+const filmsGrid =
+    $("filmsGrid");
+
+const searchInput =
+    $("searchInput");
+
+const filmModal =
+    $("filmModal");
+
+const leadersModal =
+    $("leadersModal");
+
+const toastBox =
+    $("toast");
 
 
 // =========================================================
@@ -66,11 +83,14 @@ async function api(
     if (!response.ok) {
         const error = new Error(
             data?.detail?.code ||
+            data?.detail?.message ||
             data?.detail ||
             "Request failed"
         );
 
-        error.status = response.status;
+        error.status =
+            response.status;
+
         error.data = data;
 
         throw error;
@@ -90,20 +110,24 @@ function showToast(
 ) {
     if (!toastBox) return;
 
-    toastBox.textContent = message;
-    toastBox.className = `toast show ${type}`;
+    toastBox.textContent =
+        message;
+
+    toastBox.className =
+        `toast show ${type}`;
 
     clearTimeout(
         showToast.timer
     );
 
-    showToast.timer = setTimeout(
-        () => {
-            toastBox.className =
-                "toast";
-        },
-        3000
-    );
+    showToast.timer =
+        setTimeout(
+            () => {
+                toastBox.className =
+                    "toast";
+            },
+            3000
+        );
 }
 
 
@@ -125,14 +149,21 @@ function haptic(
 function openTelegramLink(
     url
 ) {
-    if (tg?.openTelegramLink) {
-        tg.openTelegramLink(url);
-    } else {
-        window.open(
-            url,
-            "_blank"
-        );
-    }
+    if (!url) return;
+
+    try {
+        if (tg?.openTelegramLink) {
+            tg.openTelegramLink(
+                url
+            );
+            return;
+        }
+    } catch {}
+
+    window.open(
+        url,
+        "_blank"
+    );
 }
 
 
@@ -158,17 +189,22 @@ function showAccessScreen(
     const joinButton =
         $("joinChannelBtn");
 
-    if (joinButton) {
-        const username =
-            String(channel || "")
-                .replace("@", "");
+    if (!joinButton) return;
 
-        joinButton.onclick = () => {
-            openTelegramLink(
-                `https://t.me/${username}`
-            );
-        };
-    }
+    const username =
+        String(
+            channel || ""
+        )
+            .replace("@", "")
+            .trim();
+
+    if (!username) return;
+
+    joinButton.onclick = () => {
+        openTelegramLink(
+            `https://t.me/${username}`
+        );
+    };
 }
 
 
@@ -194,13 +230,15 @@ function hideAccessScreen() {
 async function loadMe() {
     try {
         const data =
-            await api("/api/me");
+            await api(
+                "/api/me"
+            );
 
         state.user =
-            data.user;
+            data.user || null;
 
         state.referral =
-            data.referral;
+            data.referral || null;
 
         renderUser();
         renderReferral();
@@ -213,11 +251,35 @@ async function loadMe() {
 
         if (
             error.status === 403 &&
-            error.data?.detail?.code
-                === "ACCESS_REQUIRED"
+            error.data?.detail?.code ===
+                "ACCESS_REQUIRED"
         ) {
             showAccessScreen(
                 error.data.detail.channel
+            );
+
+            return null;
+        }
+
+        if (
+            error.status === 401
+        ) {
+            showToast(
+                "Telegram معلومات معتبرې نه دي",
+                "error"
+            );
+
+            return null;
+        }
+
+        if (
+            error.status === 403 &&
+            error.data?.detail?.code ===
+                "USER_BLOCKED"
+        ) {
+            showToast(
+                "ستاسو حساب بند شوی دی",
+                "error"
             );
 
             return null;
@@ -254,12 +316,10 @@ function renderUser() {
             ? `@${state.user.username}`
             : "";
 
-    const nameElements = [
+    [
         $("userName"),
         $("welcomeName"),
-    ];
-
-    nameElements.forEach(
+    ].forEach(
         (element) => {
             if (element) {
                 element.textContent =
@@ -287,7 +347,9 @@ function renderReferral() {
 
     const count =
         Number(
-            state.referral.count || 0
+            state.referral.count ??
+            state.referral.referral_count ??
+            0
         );
 
     const target =
@@ -345,17 +407,18 @@ function renderReferral() {
         $("publishStatus");
 
     if (status) {
-
         if (
             state.referral.can_publish
         ) {
             status.textContent =
                 "✅ تاسو د فلم نشرولو اجازه لرئ";
+
             status.className =
                 "publish-status success";
         } else {
             status.textContent =
                 `🔒 د نشر لپاره ${remaining} ریفرل پاتې دي`;
+
             status.className =
                 "publish-status";
         }
@@ -365,7 +428,6 @@ function renderReferral() {
         $("publishBtn");
 
     if (publishButton) {
-
         publishButton.disabled =
             !state.referral.can_publish;
 
@@ -378,12 +440,11 @@ function renderReferral() {
 
 
 // =========================================================
-// REFERRAL LINK
+// REFERRAL
 // =========================================================
 
 async function loadReferral() {
     try {
-
         const data =
             await api(
                 "/api/referrals"
@@ -397,7 +458,6 @@ async function loadReferral() {
         return data;
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -412,7 +472,6 @@ async function copyReferral() {
         state.referral?.referral_link;
 
     if (!link) {
-
         const data =
             await loadReferral();
 
@@ -425,11 +484,11 @@ async function copyReferral() {
             "Referral Link پیدا نه شو",
             "error"
         );
+
         return;
     }
 
     try {
-
         await navigator.clipboard.writeText(
             link
         );
@@ -442,7 +501,6 @@ async function copyReferral() {
         );
 
     } catch {
-
         showToast(
             link
         );
@@ -496,18 +554,36 @@ function escapeHtml(
     }
 
     return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
+        .replaceAll(
+            "&",
+            "&amp;"
+        )
+        .replaceAll(
+            "<",
+            "&lt;"
+        )
+        .replaceAll(
+            ">",
+            "&gt;"
+        )
+        .replaceAll(
+            '"',
+            "&quot;"
+        )
+        .replaceAll(
+            "'",
+            "&#039;"
+        );
 }
 
 
 function filmPoster(
     film
 ) {
-    if (film.poster_url) {
+    if (
+        film &&
+        film.poster_url
+    ) {
         return film.poster_url;
     }
 
@@ -523,12 +599,15 @@ function filmCard(
 
     const title =
         escapeHtml(
-            film.title || "بې نومه فلم"
+            film.title ||
+            "بې نومه فلم"
         );
 
     const year =
         film.year
-            ? escapeHtml(film.year)
+            ? escapeHtml(
+                film.year
+            )
             : "";
 
     const quality =
@@ -543,12 +622,16 @@ function filmCard(
             class="film-card"
             onclick="openFilm(${film.id})"
         >
+
             <div class="film-poster">
+
                 ${
                     poster
                     ? `
                         <img
-                            src="${poster}"
+                            src="${escapeHtml(
+                                poster
+                            )}"
                             alt="${title}"
                             loading="lazy"
                         >
@@ -569,14 +652,17 @@ function filmCard(
                     `
                     : ""
                 }
+
             </div>
 
             <div class="film-info">
+
                 <h3>
                     ${title}
                 </h3>
 
                 <div class="film-meta">
+
                     ${
                         year
                         ? `<span>${year}</span>`
@@ -594,8 +680,11 @@ function filmCard(
                         `
                         : ""
                     }
+
                 </div>
+
             </div>
+
         </div>
     `;
 }
@@ -603,7 +692,8 @@ function filmCard(
 
 function renderFilms(
     films,
-    emptyText = "فلمونه پیدا نه شول"
+    emptyText =
+        "فلمونه پیدا نه شول"
 ) {
     state.films =
         Array.isArray(films)
@@ -613,9 +703,9 @@ function renderFilms(
     if (!filmsGrid) return;
 
     if (!state.films.length) {
-
         filmsGrid.innerHTML = `
             <div class="empty-state">
+
                 <div class="empty-icon">
                     🎬
                 </div>
@@ -625,6 +715,7 @@ function renderFilms(
                         emptyText
                     )}
                 </p>
+
             </div>
         `;
 
@@ -633,7 +724,9 @@ function renderFilms(
 
     filmsGrid.innerHTML =
         state.films
-            .map(filmCard)
+            .map(
+                filmCard
+            )
             .join("");
 }
 
@@ -644,7 +737,6 @@ function renderFilms(
 
 async function loadLatest() {
     try {
-
         setSectionTitle(
             "وروستي فلمونه"
         );
@@ -659,7 +751,6 @@ async function loadLatest() {
         );
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -689,7 +780,6 @@ async function searchFilms(
     }
 
     try {
-
         setSectionTitle(
             "د لټون پایلې"
         );
@@ -697,7 +787,9 @@ async function searchFilms(
         const data =
             await api(
                 `/api/films/search?q=${
-                    encodeURIComponent(query)
+                    encodeURIComponent(
+                        query
+                    )
                 }&limit=40`
             );
 
@@ -707,7 +799,6 @@ async function searchFilms(
         );
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -726,7 +817,6 @@ function setupSearch() {
     searchInput.addEventListener(
         "input",
         () => {
-
             clearTimeout(
                 state.searchTimer
             );
@@ -746,7 +836,6 @@ function setupSearch() {
     searchInput.addEventListener(
         "keydown",
         (event) => {
-
             if (
                 event.key === "Enter"
             ) {
@@ -779,6 +868,7 @@ async function searchByImage(
             "یوازې عکس انتخاب کړئ",
             "error"
         );
+
         return;
     }
 
@@ -795,7 +885,6 @@ async function searchByImage(
     );
 
     try {
-
         const data =
             await api(
                 "/api/films/search-image",
@@ -817,7 +906,6 @@ async function searchByImage(
         haptic("light");
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -837,29 +925,32 @@ function setupImageSearch() {
     const button =
         $("imageSearchBtn");
 
-    if (button && input) {
-
-        button.onclick = () => {
-            input.click();
-        };
-
-        input.addEventListener(
-            "change",
-            () => {
-
-                const file =
-                    input.files?.[0];
-
-                if (file) {
-                    searchByImage(
-                        file
-                    );
-                }
-
-                input.value = "";
-            }
-        );
+    if (
+        !button ||
+        !input
+    ) {
+        return;
     }
+
+    button.onclick = () => {
+        input.click();
+    };
+
+    input.addEventListener(
+        "change",
+        () => {
+            const file =
+                input.files?.[0];
+
+            if (file) {
+                searchByImage(
+                    file
+                );
+            }
+
+            input.value = "";
+        }
+    );
 }
 
 
@@ -873,7 +964,6 @@ async function loadCategory(
     if (!category) return;
 
     try {
-
         setSectionTitle(
             category
         );
@@ -881,7 +971,9 @@ async function loadCategory(
         const data =
             await api(
                 `/api/films/category/${
-                    encodeURIComponent(category)
+                    encodeURIComponent(
+                        category
+                    )
                 }?limit=40`
             );
 
@@ -891,7 +983,6 @@ async function loadCategory(
         );
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -910,7 +1001,6 @@ async function loadCategory(
 
 async function loadOfficial() {
     try {
-
         setSectionTitle(
             "⭐ رسمي فلمونه"
         );
@@ -926,7 +1016,6 @@ async function loadOfficial() {
         );
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -947,7 +1036,6 @@ async function openFilm(
     filmId
 ) {
     try {
-
         const film =
             await api(
                 `/api/films/${filmId}`
@@ -967,7 +1055,6 @@ async function openFilm(
         haptic("light");
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -1013,7 +1100,9 @@ function renderFilmModal(
                 ? `
                     <img
                         class="modal-poster"
-                        src="${poster}"
+                        src="${escapeHtml(
+                            poster
+                        )}"
                         alt="${title}"
                     >
                 `
@@ -1118,6 +1207,7 @@ function renderFilmModal(
                 </button>
 
             </div>
+
         </div>
     `;
 }
@@ -1138,14 +1228,14 @@ async function downloadFilm(
     filmId
 ) {
     try {
-
         const data =
             await api(
                 `/api/films/${filmId}/download`
             );
 
-        if (data.deep_link) {
-
+        if (
+            data.deep_link
+        ) {
             closeFilmModal();
 
             openTelegramLink(
@@ -1153,7 +1243,6 @@ async function downloadFilm(
             );
 
         } else {
-
             showToast(
                 "د فلم لینک پیدا نه شو",
                 "error"
@@ -1161,7 +1250,6 @@ async function downloadFilm(
         }
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -1180,10 +1268,9 @@ async function downloadFilm(
 
 async function openLeaders() {
     try {
-
         const data =
             await api(
-                "/api/leaders"
+                "/api/referrals/leaders"
             );
 
         renderLeaders(
@@ -1195,7 +1282,6 @@ async function openLeaders() {
         );
 
     } catch (error) {
-
         console.error(
             error
         );
@@ -1216,7 +1302,6 @@ function renderLeaders(
     const rows =
         leaders.map(
             (leader) => {
-
                 const name =
                     leader.first_name ||
                     leader.username ||
@@ -1226,7 +1311,9 @@ function renderLeaders(
                     <div class="leader-row">
 
                         <div class="leader-rank">
-                            #${leader.rank}
+                            #${Number(
+                                leader.rank || 0
+                            )}
                         </div>
 
                         <div class="leader-name">
@@ -1304,7 +1391,6 @@ async function loadChannels() {
     if (!container) return;
 
     try {
-
         const data =
             await api(
                 "/api/channels"
@@ -1314,13 +1400,11 @@ async function loadChannels() {
             data.channels || [];
 
         if (!channels.length) {
-
-            container.innerHTML =
-                `
-                    <div class="empty-state">
-                        چینلونه نشته
-                    </div>
-                `;
+            container.innerHTML = `
+                <div class="empty-state">
+                    چینلونه نشته
+                </div>
+            `;
 
             return;
         }
@@ -1328,43 +1412,57 @@ async function loadChannels() {
         container.innerHTML =
             channels.map(
                 (channel) => {
-
                     const username =
                         String(
-                            channel.username
-                            || ""
-                        ).replace(
-                            "@",
+                            channel.username ||
                             ""
+                        )
+                            .replace(
+                                "@",
+                                ""
+                            )
+                            .trim();
+
+                    const title =
+                        escapeHtml(
+                            channel.title ||
+                            channel.username ||
+                            "چینل"
                         );
 
                     return `
                         <button
                             class="channel-item"
-                            onclick="openTelegramLink('https://t.me/${username}')"
+                            onclick="openTelegramLink('https://t.me/${encodeURIComponent(
+                                username
+                            )}')"
                         >
+
                             <span>
                                 📢
                             </span>
 
                             <span>
-                                ${escapeHtml(
-                                    channel.title
-                                )}
+                                ${title}
                             </span>
 
                             <span>
                                 →
                             </span>
+
                         </button>
                     `;
                 }
             ).join("");
 
     } catch (error) {
-
         console.error(
             error
+        );
+
+        showToast(
+            "چینلونه نه شول راوستلای",
+            "error"
         );
     }
 }
@@ -1426,11 +1524,10 @@ function switchView(
         )
         .forEach(
             (button) => {
-
                 button.classList.toggle(
                     "active",
-                    button.dataset.view
-                        === view
+                    button.dataset.view ===
+                        view
                 );
             }
         );
@@ -1495,11 +1592,9 @@ function setupButtons() {
         )
         .forEach(
             (button) => {
-
                 button.addEventListener(
                     "click",
                     () => {
-
                         loadCategory(
                             button.dataset.category
                         );
@@ -1518,13 +1613,21 @@ function setupButtons() {
         )
         .forEach(
             (button) => {
-
                 button.addEventListener(
                     "click",
                     () => {
+                        const view =
+                            button.dataset.view;
+
+                        if (
+                            view === "channels"
+                        ) {
+                            loadChannels();
+                            return;
+                        }
 
                         switchView(
-                            button.dataset.view
+                            view
                         );
                     }
                 );
@@ -1540,7 +1643,6 @@ function setupButtons() {
 async function initApp() {
 
     if (!tg) {
-
         showToast(
             "دا Mini App باید د Telegram دننه خلاص شي",
             "error"
@@ -1604,6 +1706,12 @@ window.loadCategory =
 
 window.loadOfficial =
     loadOfficial;
+
+window.loadLatest =
+    loadLatest;
+
+window.loadChannels =
+    loadChannels;
 
 window.showPublishInfo =
     showPublishInfo;
