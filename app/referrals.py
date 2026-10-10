@@ -1,244 +1,159 @@
+import logging
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.database import SessionLocal
 from app.models import User, Referral
-from app.settings_db import get_referral_target, get_main_channel
 
-
-async def get_user(telegram_id: int):
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        return result.scalar_one_or_none()
+logger = logging.getLogger(__name__)
 
 
 async def get_or_create_user(
-    telegram_id: int,
-    username: str | None = None,
-    first_name: str | None = None,
+    telegram_id,
+    username=None,
+    first_name=None,
+    referrer_id=None,
 ):
+    telegram_id = int(telegram_id)
+
     async with SessionLocal() as session:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
-
         user = result.scalar_one_or_none()
 
         if user:
-            changed = False
-
-            if username is not None and user.username != username:
-                user.username = username
-                changed = True
-
-            if first_name is not None and user.first_name != first_name:
-                user.first_name = first_name
-                changed = True
-
-            if changed:
-                await session.commit()
-
+            user.username = username
+            user.first_name = first_name
+            await session.commit()
+            await session.refresh(user)
             return user
 
         user = User(
             telegram_id=telegram_id,
             username=username,
             first_name=first_name,
-            referral_count=0,
-            can_publish=False,
-            is_blocked=False,
         )
-
         session.add(user)
-        await session.commit()
-        await session.refresh(user)
 
-        return user
+        try:
+            await session.flush()
 
+            if referrer_id is not None:
+                referrer_id = int(referrer_id)
 
-async def create_referral_link(user_id: int):
-    """
-    Create a unique Telegram channel invite link for the user.
-    The bot must be an administrator of the main channel.
-    """
+                if referrer_id != telegram_id:
+                    result = await session.execute(
+                        select(User).where(
+                            User.telegram_id == referrer_id
+                        )
+                    )
+                    referrer = result.scalar_one_or_none()
 
-    main_channel = await get_main_channel()
+                    if referrer:
+                        result = await session.execute(
+                            select(Referral).where(
+                                Referral.invited_id == telegram_id
+                            )
+                        )
+                        existing = result.scalar_one_or_none()
 
-    from app.bot import bot
+                        if not existing:
+                            session.add(
+                                Referral(
+                                    inviter_id=referrer_id,
+                                    invited_id=telegram_id,
+                                )
+                            )
+                            referrer.referral_count = (
+                                int(referrer.referral_count or 0) + 1
+                            )
 
-    invite = await bot.create_chat_invite_link(
-        chat_id=main_channel,
-        name=f"ref_{user_id}",
-        creates_join_request=False,
-    )
-
-    link = invite.invite_link
-
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_id == user_id)
-        )
-
-        user = result.scalar_one_or_none()
-
-        if user:
-            user.referral_link = link
             await session.commit()
+            await session.refresh(user)
+            return user
 
-    return link
+        except IntegrityError:
+            await session.rollback()
 
-
-async def get_referral_count(telegram_id: int) -> int:
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(User.referral_count).where(
-                User.telegram_id == telegram_id
+            result = await session.execute(
+                select(User).where(User.telegram_id == telegram_id)
             )
-        )
+            existing_user = result.scalar_one_or_none()
 
-        count = result.scalar_one_or_none()
+            if existing_user:
+                return existing_user
 
-        return int(count or 0)
-
-
-async def can_publish(telegram_id: int) -> bool:
-    user = await get_user(telegram_id)
-
-    if not user:
-        return False
-
-    if user.is_blocked:
-        return False
-
-    target = await get_referral_target()
-
-    return (
-        int(user.referral_count or 0) >= target
-        or bool(user.can_publish)
-    )
+            raise
 
 
 async def process_channel_join(
-    inviter_id: int | None,
-    invited_id: int,
-    invite_link: str | None = None,
+    joined_user_id,
+    invite_link=None,
 ):
     """
-    Count a referral only when the user joined through
-    a stored personal invite link.
-
-    Direct joins do not count.
-    Each Telegram account can be counted only once.
-    Self-referrals are rejected.
+    د اصلي چینل د نوي غړي د ګډون ثبتول.
+    joined_user_id باید د نوي شامل شوي غړي Telegram ID وي.
     """
 
     if not invite_link:
-        return {
-            "success": False,
-            "reason": "no_invite_link",
-        }
+        return False
+
+    joined_user_id = int(joined_user_id)
 
     async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == joined_user_id)
+        )
+        joined_user = result.scalar_one_or_none()
 
-        # Prevent the same Telegram account from being counted twice.
-        existing_result = await session.execute(
+        if joined_user is None:
+            return False
+
+        result = await session.execute(
             select(Referral).where(
-                Referral.invited_id == invited_id
+                Referral.invited_id == joined_user_id
             )
         )
+        existing_referral = result.scalar_one_or_none()
 
-        already_referred = existing_result.scalar_one_or_none()
+        if existing_referral:
+            return False
 
-        if already_referred:
-            return {
-                "success": False,
-                "reason": "already_counted",
-                "inviter_id": already_referred.inviter_id,
-            }
-
-        # Find the owner of the exact invite link.
-        inviter_result = await session.execute(
-            select(User).where(
-                User.referral_link == invite_link
-            )
+        result = await session.execute(
+            select(User).where(User.referral_link == invite_link)
         )
+        inviter = result.scalar_one_or_none()
 
-        inviter = inviter_result.scalar_one_or_none()
+        if inviter is None or inviter.telegram_id == joined_user_id:
+            return False
 
-        if inviter is None:
-            return {
-                "success": False,
-                "reason": "invite_link_not_found",
-            }
-
-        inviter_id = inviter.telegram_id
-
-        # Self-referral protection.
-        if inviter_id == invited_id:
-            return {
-                "success": False,
-                "reason": "self_referral",
-            }
-
-        # Make sure invited user exists.
-        invited_result = await session.execute(
-            select(User).where(
-                User.telegram_id == invited_id
-            )
-        )
-
-        invited_user = invited_result.scalar_one_or_none()
-
-        if invited_user is None:
-            invited_user = User(
-                telegram_id=invited_id,
-                referral_count=0,
-                can_publish=False,
-                is_blocked=False,
-            )
-
-            session.add(invited_user)
-            await session.flush()
-
-        # Create referral record.
         referral = Referral(
-            inviter_id=inviter_id,
-            invited_id=invited_id,
+            inviter_id=inviter.telegram_id,
+            invited_id=joined_user_id,
             invite_link=invite_link,
         )
-
         session.add(referral)
 
-        # Increase inviter count.
-        inviter.referral_count = int(
-            inviter.referral_count or 0
-        ) + 1
-
-        # Check publishing target.
-        target = await get_referral_target()
-
-        if inviter.referral_count >= target:
-            inviter.can_publish = True
+        inviter.referral_count = int(inviter.referral_count or 0) + 1
 
         await session.commit()
-
-        return {
-            "success": True,
-            "reason": "referral_counted",
-            "inviter_id": inviter_id,
-            "invited_id": invited_id,
-            "referral_count": inviter.referral_count,
-            "target": target,
-            "remaining": max(
-                target - inviter.referral_count,
-                0,
-            ),
-            "can_publish": bool(inviter.can_publish),
-        }
+        return True
 
 
-async def get_referral_leaders(limit: int = 50):
+async def get_referral_count(telegram_id):
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(
+                User.telegram_id == int(telegram_id)
+            )
+        )
+        user = result.scalar_one_or_none()
+
+        return int(user.referral_count or 0) if user else 0
+
+
+async def get_referral_leaders(limit=20):
     limit = max(1, min(int(limit), 100))
 
     async with SessionLocal() as session:
@@ -247,89 +162,57 @@ async def get_referral_leaders(limit: int = 50):
             .where(User.referral_count > 0)
             .order_by(
                 User.referral_count.desc(),
-                User.created_at.asc(),
+                User.telegram_id.asc(),
             )
             .limit(limit)
         )
-
-        return result.scalars().all()
-
-
-async def ensure_referral_link(user_id: int):
-    """
-    Return existing referral link or create a new one.
-    """
-
-    user = await get_user(user_id)
-
-    if not user:
-        return None
-
-    if user.referral_link:
-        return user.referral_link
-
-    return await create_referral_link(user_id)
-
-
-async def get_referral_status(telegram_id: int):
-    user = await get_user(telegram_id)
-
-    target = await get_referral_target()
-
-    if not user:
-        return {
-            "referral_count": 0,
-            "count": 0,
-            "target": target,
-            "remaining": target,
-            "can_publish": False,
-            "referral_link": None,
-        }
-
-    count = int(user.referral_count or 0)
-
-    can_publish_now = (
-        count >= target
-        or bool(user.can_publish)
-    )
-
-    return {
-        "referral_count": count,
-        "count": count,
-        "target": target,
-        "remaining": max(target - count, 0),
-        "can_publish": can_publish_now,
-        "referral_link": user.referral_link,
-    }
-
-
-async def refresh_publish_permissions():
-    """
-    Recalculate publishing permissions using the current
-    referral target.
-    """
-
-    target = await get_referral_target()
-
-    async with SessionLocal() as session:
-        result = await session.execute(select(User))
-
         users = result.scalars().all()
 
-        changed = 0
+        return [
+            {
+                "telegram_id": user.telegram_id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "referral_count": int(user.referral_count or 0),
+            }
+            for user in users
+        ]
 
-        for user in users:
-            should_publish = (
-                int(user.referral_count or 0) >= target
+
+async def create_referral_link(telegram_id, link):
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(
+                User.telegram_id == int(telegram_id)
             )
+        )
+        user = result.scalar_one_or_none()
 
-            if user.can_publish != should_publish:
-                user.can_publish = should_publish
-                changed += 1
+        if user is None:
+            return False
 
+        user.referral_link = link
         await session.commit()
+        return True
 
-        return {
-            "target": target,
-            "updated_users": changed,
-        }
+
+async def update_publishing_permission(
+    telegram_id,
+    target=50,
+):
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(
+                User.telegram_id == int(telegram_id)
+            )
+        )
+        user = result.scalar_one_or_none()
+
+        if user is None:
+            return False
+
+        user.can_publish = (
+            int(user.referral_count or 0) >= int(target)
+        )
+        await session.commit()
+        return bool(user.can_publish)
