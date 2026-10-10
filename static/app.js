@@ -1,53 +1,21 @@
 (() => {
   "use strict";
 
-  if (window.__APF_APP_STARTED__) return;
-  window.__APF_APP_STARTED__ = true;
-
-  const tg = window.Telegram?.WebApp || null;
+  const tg = window.Telegram?.WebApp;
   const INIT_DATA = tg?.initData || "";
   const API_BASE = "";
-  const $ = (s, root = document) => root.querySelector(s);
-  const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+  const BOT_URL = "https://t.me/ALL_PRODUCTION_FILMBOT";
 
   let currentUser = null;
   let toastTimer = null;
 
-  function showMessage(message, isError = false) {
-    let box = $("#appMessage");
-
-    if (!box) {
-      box = document.createElement("div");
-      box.id = "appMessage";
-      box.setAttribute("role", "status");
-      box.style.cssText =
-        "display:block;margin:16px;padding:16px;border-radius:12px;" +
-        "background:#202633;color:white;text-align:center;" +
-        "direction:rtl;white-space:pre-wrap;overflow-wrap:anywhere;";
-      document.body.prepend(box);
-    }
-
-    box.style.border = isError
-      ? "1px solid #e05252"
-      : "1px solid #53657a";
-
-    box.textContent = message;
-  }
-
-  function clearMessage() {
-    $("#appMessage")?.remove();
-  }
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) =>
+    Array.from(root.querySelectorAll(selector));
 
   function toast(message) {
-    let el = $("#toast");
-
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "toast";
-      el.className = "toast";
-      el.setAttribute("role", "status");
-      document.body.appendChild(el);
-    }
+    const el = $("#toast");
+    if (!el) return;
 
     el.textContent = message;
     el.classList.add("show");
@@ -55,10 +23,25 @@
     toastTimer = setTimeout(() => el.classList.remove("show"), 3000);
   }
 
+  function showError(message) {
+    let el = $("#appError");
+
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "appError";
+      el.setAttribute("role", "alert");
+      el.style.cssText =
+        "margin:16px;padding:16px;border-radius:12px;background:#202633;color:white;text-align:center;direction:rtl;line-height:1.8";
+      document.body.prepend(el);
+    }
+
+    el.textContent = message;
+  }
+
   async function api(path, options = {}) {
     if (!INIT_DATA) {
       throw new Error(
-        "د Telegram د اعتبار معلومات نشته. Mini App د بوټ له اصلي تڼۍ څخه خلاص کړه."
+        "د Telegram د اعتبار معلومات نشته. Mini App د Telegram له اصلي تڼۍ څخه خلاص کړئ."
       );
     }
 
@@ -69,36 +52,33 @@
       headers.set("Content-Type", "application/json");
     }
 
-    const response = await fetch(API_BASE + path, {
+    const response = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers,
       cache: "no-store"
     });
 
     const contentType = response.headers.get("content-type") || "";
-    let data;
-
-    if (contentType.includes("application/json")) {
-      data = await response.json();
-    } else {
-      const text = await response.text();
-      data = { detail: text.slice(0, 250) };
-    }
+    const data = contentType.includes("application/json")
+      ? await response.json()
+      : await response.text();
 
     if (!response.ok) {
+      if (response.status === 403) {
+        showJoinScreen(data?.access_channel);
+        throw new Error("JOIN_REQUIRED");
+      }
+
       if (response.status === 401) {
         throw new Error(
-          "د Telegram اعتبار تایید نه شو. Mini App بنده او بیا یې د بوټ له اصلي تڼۍ خلاص کړه."
+          "د Telegram اعتبار تایید نه شو. Mini App له Telegram څخه بیا خلاص کړئ."
         );
       }
 
-      if (response.status === 403 && data?.detail === "JOIN_REQUIRED") {
-        showJoinScreen(data.access_channel);
-        throw new Error("لومړی اړین چینل کې ګډون وکړه.");
-      }
-
       throw new Error(
-        data?.detail || `د سرور تېروتنه: ${response.status}`
+        typeof data === "object"
+          ? data.detail || `د سرور خطا: ${response.status}`
+          : `د سرور خطا: ${response.status}`
       );
     }
 
@@ -106,53 +86,51 @@
   }
 
   function showJoinScreen(channel) {
-    const access = $("#accessScreen");
-
-    if (access) {
-      access.hidden = false;
-      access.style.display = "flex";
-    }
-
+    const screen = $("#accessScreen");
     const main = $("#mainApp");
 
+    if (screen) {
+      screen.classList.remove("hidden");
+      screen.hidden = false;
+      screen.style.display = "flex";
+    }
+
     if (main) {
+      main.classList.add("hidden");
       main.hidden = true;
-      main.style.display = "none";
     }
 
-    const message = $("#accessMessage");
+    const button = $("#joinChannelBtn");
+    if (button) {
+      button.onclick = () => {
+        const name = String(channel || "ALL_PASHTO")
+          .replace(/^@/, "")
+          .replace(/^https?:\/\/t\.me\//, "")
+          .replace(/\/$/, "");
 
-    if (message) {
-      message.textContent =
-        "د فلمونو د کتلو لپاره لومړی اړین Telegram چینل کې ګډون وکړه، بیا Mini App بېرته خلاص کړه.";
+        const url = `https://t.me/${name}`;
+
+        if (tg?.openTelegramLink) {
+          tg.openTelegramLink(url);
+        } else {
+          window.open(url, "_blank", "noopener,noreferrer");
+        }
+      };
     }
-
-    const button = $("#joinChannel");
-
-    if (button && channel) {
-      const name = String(channel)
-        .replace(/^@/, "")
-        .replace(/^https?:\/\/t\.me\//, "")
-        .replace(/\/$/, "");
-
-      button.href = "https://t.me/" + name;
-      button.hidden = false;
-    }
-
-    clearMessage();
   }
 
   function showMain() {
-    const access = $("#accessScreen");
-
-    if (access) {
-      access.hidden = true;
-      access.style.display = "none";
-    }
-
+    const screen = $("#accessScreen");
     const main = $("#mainApp");
 
+    if (screen) {
+      screen.classList.add("hidden");
+      screen.hidden = true;
+      screen.style.display = "none";
+    }
+
     if (main) {
+      main.classList.remove("hidden");
       main.hidden = false;
       main.style.display = "";
     }
@@ -166,29 +144,31 @@
   function setUser(user) {
     currentUser = user || {};
 
-    setText(
-      "#userName",
+    const name =
       currentUser.first_name ||
       currentUser.username ||
-      "ګرانه کاروونکی"
+      "ګرانه کاروونکی";
+
+    setText("#userName", name);
+    setText("#welcomeName", name);
+    setText(
+      "#userUsername",
+      currentUser.username ? `@${String(currentUser.username).replace(/^@/, "")}` : ""
     );
 
-    setText("#referralCount", currentUser.referral_count ?? 0);
-
-    const target = Number(currentUser.referral_target || 50);
     const count = Number(currentUser.referral_count || 0);
+    const target = Math.max(1, Number(currentUser.referral_target || 50));
+    const remaining = Math.max(0, target - count);
+    const percent = Math.min(100, (count / target) * 100);
 
-    setText("#referralProgressText", `${count} / ${target}`);
+    setText("#referralCount", count);
+    setText("#referralTarget", target);
+    setText("#referralRemaining", remaining);
 
     const progress = $("#referralProgress");
+    if (progress) progress.style.width = `${percent}%`;
 
-    if (progress) {
-      progress.style.width =
-        `${target > 0 ? Math.min(100, count / target * 100) : 0}%`;
-    }
-
-    const publish = $("#publishFilm");
-
+    const publish = $("#publishBtn");
     if (publish) {
       publish.disabled = !currentUser.can_publish;
       publish.setAttribute(
@@ -196,10 +176,38 @@
         String(!currentUser.can_publish)
       );
     }
+
+    setText(
+      "#publishStatus",
+      currentUser.can_publish
+        ? "✅ تاسو د فلم خپرولو اجازه لرئ."
+        : `🔒 د نشر لپاره ${remaining} نورې بلنې پکار دي.`
+    );
   }
 
-  function renderFilms(films, selector = "#filmGrid") {
-    const container = $(selector);
+  function switchView(view) {
+    const grid = $("#filmsGrid");
+    const channels = $(".channels-section");
+    const title = $("#sectionTitle");
+
+    if (grid) grid.style.display = view === "channels" ? "none" : "";
+    if (channels) channels.style.display = view === "channels" ? "" : "none";
+
+    const titles = {
+      home: "وروستي فلمونه",
+      official: "رسمي فلمونه",
+      channels: "زموږ چینلونه"
+    };
+
+    if (title) title.textContent = titles[view] || "وروستي فلمونه";
+
+    $$("[data-view]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.view === view);
+    });
+  }
+
+  function renderFilms(films) {
+    const container = $("#filmsGrid");
     if (!container) return;
 
     container.replaceChildren();
@@ -217,18 +225,14 @@
       card.type = "button";
       card.className = "film-card";
 
-      card.addEventListener("click", () => {
-        openFilm(film.id).catch(handleError);
-      });
-
       if (film.poster_url) {
-        const img = document.createElement("img");
-        img.className = "film-poster";
-        img.src = film.poster_url;
-        img.alt = film.title || "فلم";
-        img.loading = "lazy";
-        img.onerror = () => img.remove();
-        card.appendChild(img);
+        const image = document.createElement("img");
+        image.className = "film-poster";
+        image.src = film.poster_url;
+        image.alt = film.title || "فلم";
+        image.loading = "lazy";
+        image.onerror = () => image.remove();
+        card.appendChild(image);
       }
 
       const title = document.createElement("div");
@@ -243,266 +247,250 @@
         film.quality,
         film.language
       ].filter(Boolean).join(" • ");
-
       card.appendChild(info);
+
+      card.addEventListener("click", () => openFilm(film.id));
       container.appendChild(card);
     });
   }
 
-  async function loadMe() {
-    const user = await api("/api/me");
-    setUser(user);
-    showMain();
-    return user;
-  }
-
-  async function loadFilms() {
-    const data = await api("/api/films/latest");
-    renderFilms(data.films || []);
+  async function loadLatest() {
+    try {
+      const data = await api("/api/films/latest");
+      renderFilms(data.films || []);
+      switchView("home");
+    } catch (error) {
+      toast(error.message || "د فلمونو په راوړلو کې ستونزه ده.");
+    }
   }
 
   async function loadOfficial() {
-    const data = await api("/api/films/official");
-    renderFilms(data.films || []);
-    switchView("official");
+    try {
+      const data = await api("/api/films/official");
+      renderFilms(data.films || []);
+      switchView("official");
+    } catch (error) {
+      toast(error.message || "رسمي فلمونه نه پورته کېږي.");
+    }
+  }
+
+  async function loadCategory(category) {
+    try {
+      const data = await api(
+        `/api/films/category?category=${encodeURIComponent(category)}`
+      );
+      renderFilms(data.films || []);
+      setText("#sectionTitle", category);
+      switchView("home");
+    } catch (error) {
+      toast(error.message || "د کټګورۍ فلمونه نه پورته کېږي.");
+    }
   }
 
   async function searchFilms(query) {
-    const data = await api(
-      `/api/films/search?q=${encodeURIComponent(query)}`
-    );
-
-    renderFilms(data.films || []);
-    switchView("home");
+    try {
+      const data = await api(
+        `/api/films/search?q=${encodeURIComponent(query)}`
+      );
+      renderFilms(data.films || []);
+      switchView("home");
+    } catch (error) {
+      toast(error.message || "د لټون پر مهال ستونزه رامنځته شوه.");
+    }
   }
 
   async function loadChannels() {
-    const data = await api("/api/channels");
-    const container = $("#channelsList");
+    try {
+      const data = await api("/api/channels");
+      const container = $("#channelsList");
 
-    if (container) {
-      container.replaceChildren();
+      if (container) {
+        container.replaceChildren();
 
-      (data.channels || []).forEach((channel) => {
-        const username = String(channel.username || "")
-          .replace(/^@/, "");
+        (data.channels || []).forEach((channel) => {
+          const link = document.createElement("a");
+          link.className = "channel-item";
+          link.href =
+            channel.url ||
+            `https://t.me/${String(channel.username || "").replace(/^@/, "")}`;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent =
+            channel.title || channel.username || "Telegram چینل";
+          container.appendChild(link);
+        });
 
-        const link = document.createElement("a");
-        link.className = "channel-item";
-        link.href = channel.url || `https://t.me/${username}`;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.textContent =
-          channel.title || channel.username || "Telegram چینل";
-
-        container.appendChild(link);
-      });
-
-      if (!container.children.length) {
-        container.textContent = "تر اوسه چینلونه نه دي ثبت شوي.";
+        if (!container.children.length) {
+          container.textContent = "تر اوسه چینلونه نه دي ثبت شوي.";
+        }
       }
+
+      switchView("channels");
+    } catch (error) {
+      toast(error.message || "چینلونه نه پورته کېږي.");
     }
-
-    switchView("channels");
-  }
-
-  async function loadLeaders() {
-    const data = await api("/api/leaders");
-    const container = $("#leadersList");
-
-    if (container) {
-      container.replaceChildren();
-
-      (data.leaders || []).forEach((leader, index) => {
-        const row = document.createElement("div");
-        row.className = "leader-item";
-
-        const name = document.createElement("span");
-        name.textContent =
-          `${index + 1}. ${leader.first_name || leader.username || "کاروونکی"}`;
-
-        const count = document.createElement("span");
-        count.textContent = `${leader.referral_count || 0} بلنې`;
-
-        row.append(name, count);
-        container.appendChild(row);
-      });
-
-      if (!container.children.length) {
-        container.textContent = "تر اوسه د بلنو معلومات نشته.";
-      }
-    }
-
-    const modal = $("#leadersModal");
-    if (modal) modal.hidden = false;
   }
 
   async function loadReferrals() {
     const data = await api("/api/referrals");
-    const link = $("#referralLink");
 
-    if (link && data.referral_link) {
-      link.value = data.referral_link;
-    }
+    const input = $("#referralLink");
+    if (input && data.referral_link) input.value = data.referral_link;
 
-    setText(
-      "#referralCount",
+    const count = Number(
       data.referral_count ?? data.count ?? currentUser?.referral_count ?? 0
     );
+    setText("#referralCount", count);
+
+    const target = Math.max(
+      1,
+      Number(data.referral_target || currentUser?.referral_target || 50)
+    );
+    setText("#referralTarget", target);
+    setText("#referralRemaining", Math.max(0, target - count));
+
+    const progress = $("#referralProgress");
+    if (progress) {
+      progress.style.width = `${Math.min(100, (count / target) * 100)}%`;
+    }
 
     return data;
   }
 
-  async function openFilm(id) {
-    const film = await api(`/api/films/${encodeURIComponent(id)}`);
+  async function loadLeaders() {
+    try {
+      const data = await api("/api/leaders");
+      let modal = $("#leadersModal");
 
-    setText("#filmModalTitle", film.title || "فلم");
-    setText("#filmModalDescription", film.description || "");
-    setText(
-      "#filmModalInfo",
-      [film.year, film.quality, film.genre, film.language]
-        .filter(Boolean).join(" • ")
-    );
+      if (!modal) return;
 
-    const modal = $("#filmModal");
-    if (modal) modal.hidden = false;
+      modal.replaceChildren();
+      modal.classList.add("modal-open");
+      modal.hidden = false;
+      modal.style.display = "flex";
 
-    const download = $("#downloadFilm");
+      const card = document.createElement("div");
+      card.className = "modal-card";
 
-    if (download) {
-      download.onclick = async () => {
-        try {
-          const result = await api(
-            `/api/films/${encodeURIComponent(id)}/download`
-          );
+      const heading = document.createElement("h2");
+      heading.textContent = "🏆 د ریفرل مخکښان";
+      card.appendChild(heading);
 
-          const url = result.url || result.telegram_url;
+      const close = document.createElement("button");
+      close.type = "button";
+      close.textContent = "✖ بندول";
+      close.addEventListener("click", () => {
+        modal.hidden = true;
+        modal.style.display = "none";
+      });
+      card.appendChild(close);
 
-          if (!url) {
-            toast("د فلم د ډاونلوډ لینک نه دی موجود.");
-            return;
-          }
+      const leaders = data.leaders || [];
+      if (!leaders.length) {
+        const empty = document.createElement("p");
+        empty.textContent = "تر اوسه معلومات نشته.";
+        card.appendChild(empty);
+      }
 
-          if (tg?.openTelegramLink) {
-            tg.openTelegramLink(url);
-          } else {
-            window.open(url, "_blank", "noopener,noreferrer");
-          }
-        } catch (error) {
-          handleError(error);
-        }
-      };
+      leaders.forEach((leader, index) => {
+        const row = document.createElement("p");
+        row.textContent =
+          `${index + 1}. ${leader.first_name || leader.username || "کاروونکی"} — ${leader.referral_count || 0} بلنې`;
+        card.appendChild(row);
+      });
+
+      modal.appendChild(card);
+    } catch (error) {
+      toast(error.message || "د مخکښانو معلومات نه پورته کېږي.");
     }
   }
 
-  function switchView(view) {
-    $$(".view").forEach((el) => {
-      el.hidden = el.dataset.view !== view;
-    });
+  async function openFilm(id) {
+    try {
+      const film = await api(`/api/films/${id}`);
+      let modal = $("#filmModal");
+      if (!modal) return;
 
-    $$("[data-nav]").forEach((el) => {
-      el.classList.toggle("active", el.dataset.nav === view);
-    });
+      modal.replaceChildren();
+      modal.hidden = false;
+      modal.style.display = "flex";
+      modal.classList.add("modal-open");
+
+      const card = document.createElement("div");
+      card.className = "modal-card";
+
+      const heading = document.createElement("h2");
+      heading.textContent = film.title || "فلم";
+      card.appendChild(heading);
+
+      const info = document.createElement("p");
+      info.textContent = [
+        film.year,
+        film.quality,
+        film.genre,
+        film.language
+      ].filter(Boolean).join(" • ");
+      card.appendChild(info);
+
+      const description = document.createElement("p");
+      description.textContent = film.description || "";
+      card.appendChild(description);
+
+      const download = document.createElement("button");
+      download.type = "button";
+      download.className = "primary-btn";
+      download.textContent = "▶ فلم ترلاسه کړئ";
+      download.addEventListener("click", async () => {
+        try {
+          const result = await api(`/api/films/${id}/download`);
+          const url = result.url || result.telegram_url;
+
+          if (!url) {
+            toast("د فلم لینک نشته.");
+            return;
+          }
+
+          if (tg?.openTelegramLink) tg.openTelegramLink(url);
+          else window.open(url, "_blank", "noopener,noreferrer");
+        } catch (error) {
+          toast(error.message || "فلم نه ترلاسه کېږي.");
+        }
+      });
+      card.appendChild(download);
+
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "secondary-btn";
+      close.textContent = "بندول";
+      close.addEventListener("click", () => {
+        modal.hidden = true;
+        modal.style.display = "none";
+      });
+      card.appendChild(close);
+
+      modal.appendChild(card);
+    } catch (error) {
+      toast(error.message || "فلم نه پرانیستل کېږي.");
+    }
   }
 
-  function handleError(error) {
-    const message = error?.message || "ناڅرګنده تېروتنه رامنځته شوه.";
-    console.error("ALL PRODUCTION FILMS:", error);
-    showMessage(message, true);
+  function openTelegram(url) {
+    if (tg?.openTelegramLink) tg.openTelegramLink(url);
+    else window.open(url, "_blank", "noopener,noreferrer");
   }
 
   function bindEvents() {
-    $("#searchForm")?.addEventListener("submit", async (event) => {
-      event.preventDefault();
-
-      const query = $("#searchInput")?.value.trim();
-
-      try {
-        clearMessage();
-
-        if (query) {
-          await searchFilms(query);
-        } else {
-          await loadFilms();
-          switchView("home");
-        }
-      } catch (error) {
-        handleError(error);
+    $("#searchInput")?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const query = event.target.value.trim();
+        if (query) searchFilms(query);
+        else loadLatest();
       }
     });
 
-    $$("[data-nav]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          clearMessage();
-          const view = button.dataset.nav;
-
-          if (view === "official") {
-            await loadOfficial();
-          } else if (view === "channels") {
-            await loadChannels();
-          } else if (view === "leaders") {
-            await loadLeaders();
-          } else {
-            await loadFilms();
-            switchView("home");
-          }
-        } catch (error) {
-          handleError(error);
-        }
-      });
-    });
-
-    $("#copyReferralLink")?.addEventListener("click", async () => {
-      const input = $("#referralLink");
-      const value = input?.value;
-
-      if (!value) {
-        toast("د بلنې لینک نشته.");
-        return;
-      }
-
-      try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(value);
-        } else if (input) {
-          input.focus();
-          input.select();
-
-          if (!document.execCommand("copy")) {
-            throw new Error("Copy failed");
-          }
-        }
-
-        toast("د بلنې لینک کاپي شو.");
-      } catch {
-        toast("لینک انتخاب او په لاس یې کاپي کړه.");
-      }
-    });
-
-    $("#closeFilmModal")?.addEventListener("click", () => {
-      const modal = $("#filmModal");
-      if (modal) modal.hidden = true;
-    });
-
-    $("#closeLeadersModal")?.addEventListener("click", () => {
-      const modal = $("#leadersModal");
-      if (modal) modal.hidden = true;
-    });
-
-    $("#publishFilm")?.addEventListener("click", () => {
-      if (!currentUser?.can_publish) {
-        toast("د فلم خپرولو لپاره د بلنو هدف بشپړ کړه.");
-        return;
-      }
-
-      const url = "https://t.me/ALL_PRODUCTION_FILMBOT";
-
-      if (tg?.openTelegramLink) {
-        tg.openTelegramLink(url);
-      } else {
-        window.open(url, "_blank", "noopener,noreferrer");
-      }
+    $("#imageSearchBtn")?.addEventListener("click", () => {
+      $("#imageSearchInput")?.click();
     });
 
     $("#imageSearchInput")?.addEventListener("change", async (event) => {
@@ -513,20 +501,83 @@
       form.append("image", file);
 
       try {
-        clearMessage();
-
         const data = await api("/api/films/search-image", {
           method: "POST",
           body: form
         });
-
         renderFilms(data.films || []);
         switchView("home");
       } catch (error) {
-        handleError(error);
+        toast(error.message || "د عکس له لارې لټون ناکام شو.");
       } finally {
         event.target.value = "";
       }
+    });
+
+    $("#copyReferralBtn")?.addEventListener("click", async () => {
+      try {
+        const data = await loadReferrals();
+        const link = data.referral_link;
+
+        if (!link) {
+          toast("د بلنې لینک لا نه دی جوړ شوی.");
+          return;
+        }
+
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(link);
+        } else {
+          const input = document.createElement("textarea");
+          input.value = link;
+          document.body.appendChild(input);
+          input.select();
+          document.execCommand("copy");
+          input.remove();
+        }
+
+        toast("د بلنې لینک کاپي شو.");
+      } catch (error) {
+        toast(error.message || "د لینک کاپي ممکن نه شوه.");
+      }
+    });
+
+    $("#shareReferralBtn")?.addEventListener("click", async () => {
+      try {
+        const data = await loadReferrals();
+        if (!data.referral_link) {
+          toast("د بلنې لینک لا نه دی جوړ شوی.");
+          return;
+        }
+
+        const shareUrl =
+          "https://t.me/share/url?url=" +
+          encodeURIComponent(data.referral_link) +
+          "&text=" +
+          encodeURIComponent("زموږ د فلمونو Mini App وکاروئ 🎬");
+
+        openTelegram(shareUrl);
+      } catch (error) {
+        toast(error.message || "د شریکولو لینک نه جوړېږي.");
+      }
+    });
+
+    $("#publishBtn")?.addEventListener("click", () => {
+      if (!currentUser?.can_publish) {
+        toast("د فلم خپرولو لپاره د ریفرل هدف بشپړ کړئ.");
+        return;
+      }
+      openTelegram(BOT_URL);
+    });
+
+    $$("[data-view]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const view = button.dataset.view;
+
+        if (view === "official") await loadOfficial();
+        else if (view === "leaders") await loadLeaders();
+        else if (view === "channels") await loadChannels();
+        else await loadLatest();
+      });
     });
   }
 
@@ -534,40 +585,31 @@
     try {
       tg?.ready();
       tg?.expand();
-
       bindEvents();
 
       if (!INIT_DATA) {
-        showMessage(
-          "د Telegram اعتبار معلومات نشته.\n\n" +
-          "Mini App د Telegram له بوټ څخه خلاص کړه، نه د عادي براوزر له لارې.",
-          true
+        showError(
+          "Mini App د Telegram له اصلي تڼۍ څخه خلاص کړئ؛ د Telegram اعتبار معلومات نشته."
         );
         return;
       }
 
-      showMessage("Mini App پرانیستل کېږي…");
+      const user = await api("/api/me");
+      setUser(user);
+      showMain();
 
-      await loadMe();
-      clearMessage();
-
-      // که یوه برخه ناکامه شي، نورې برخې هم د کار کولو هڅه کوي.
-      const results = await Promise.allSettled([
-        loadFilms(),
-        loadReferrals()
-      ]);
-
-      const failed = results.find((item) => item.status === "rejected");
-
-      if (failed) {
-        handleError(failed.reason);
-      }
-
+      await Promise.allSettled([loadLatest(), loadReferrals(), loadChannels()]);
       switchView("home");
     } catch (error) {
-      handleError(error);
+      console.error("Mini App startup error:", error);
+      showError(error.message || "Mini App نه پرانیستل کېږي. بیا هڅه وکړئ.");
     }
   }
+
+  // د HTML د موجودو تڼیو لپاره
+  window.loadLatest = loadLatest;
+  window.loadOfficial = loadOfficial;
+  window.loadCategory = loadCategory;
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", start, { once: true });
