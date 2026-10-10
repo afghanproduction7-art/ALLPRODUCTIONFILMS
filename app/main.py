@@ -1,3 +1,4 @@
+
 import asyncio
 import hashlib
 import hmac
@@ -17,12 +18,12 @@ from fastapi import (
     Query,
     UploadFile,
     File,
-    Body,
+    Depends,
 )
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
@@ -39,8 +40,10 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 BOT_TOKEN = settings.BOT_TOKEN
-ADMIN_IDS = set(settings.ADMIN_IDS)
-BOT_USERNAME = os.getenv("BOT_USERNAME", "ALL_PRODUCTION_FILMBOT")
+ADMIN_IDS = {int(x) for x in settings.ADMIN_IDS}
+BOT_USERNAME = os.getenv(
+    "BOT_USERNAME", "ALL_PRODUCTION_FILMBOT"
+).lstrip("@").strip()
 
 
 # --------------------------------------------------
@@ -87,7 +90,7 @@ class UserUpdate(BaseModel):
 
 
 # --------------------------------------------------
-# Telegram WebApp initData validation
+# Telegram authentication
 # --------------------------------------------------
 
 def validate_telegram_init_data(init_data: str) -> dict:
@@ -102,17 +105,17 @@ def validate_telegram_init_data(init_data: str) -> dict:
         received_hash = data.pop("hash", None)
 
         if not received_hash:
-            raise ValueError("Missing Telegram hash")
+            raise ValueError("Missing hash")
 
         auth_date = int(data.get("auth_date", "0"))
 
-        # Reject old authentication data (24 hours).
-        if not auth_date or abs(int(time.time()) - auth_date) > 86400:
-            raise ValueError("Expired Telegram authentication")
+        # Reject expired data and timestamps too far in the future.
+        now = int(time.time())
+        if not auth_date or now - auth_date > 86400 or auth_date - now > 60:
+            raise ValueError("Expired authentication data")
 
         data_check_string = "\n".join(
-            f"{key}={value}"
-            for key, value in sorted(data.items())
+            f"{key}={value}" for key, value in sorted(data.items())
         )
 
         secret_key = hmac.new(
@@ -128,19 +131,18 @@ def validate_telegram_init_data(init_data: str) -> dict:
         ).hexdigest()
 
         if not hmac.compare_digest(calculated_hash, received_hash):
-            raise ValueError("Invalid Telegram signature")
+            raise ValueError("Invalid signature")
 
         user_data = json.loads(data.get("user", "{}"))
-
         if not user_data.get("id"):
-            raise ValueError("Missing Telegram user")
+            raise ValueError("Missing user")
 
         return user_data
 
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Telegram initData validation failed: %s", exc)
+        logger.warning("Telegram authentication failed: %s", exc)
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired Telegram authentication",
@@ -159,8 +161,8 @@ async def get_current_user(
             detail="Telegram authentication required",
         )
 
-    telegram_user = validate_telegram_init_data(x_telegram_init_data)
-    telegram_id = int(telegram_user["id"])
+    tg_user = validate_telegram_init_data(x_telegram_init_data)
+    telegram_id = int(tg_user["id"])
 
     async with SessionLocal() as session:
         result = await session.execute(
@@ -171,10 +173,14 @@ async def get_current_user(
         if user is None:
             user = User(
                 telegram_id=telegram_id,
-                username=telegram_user.get("username"),
-                first_name=telegram_user.get("first_name", ""),
+                username=tg_user.get("username"),
+                first_name=tg_user.get("first_name", ""),
+                referral_count=0,
+                can_publish=False,
+                is_blocked=False,
             )
             session.add(user)
+
             try:
                 await session.commit()
                 await session.refresh(user)
@@ -186,36 +192,32 @@ async def get_current_user(
                 user = result.scalar_one_or_none()
 
         if user is None:
-            raise HTTPException(status_code=500, detail="Unable to load user")
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to load user",
+            )
 
-        if getattr(user, "is_blocked", False):
+        if user.is_blocked:
             raise HTTPException(status_code=403, detail="Account blocked")
 
         return {
             "telegram_id": user.telegram_id,
             "username": user.username,
             "first_name": user.first_name,
-            "referral_count": user.referral_count or 0,
+            "referral_count": int(user.referral_count or 0),
             "can_publish": bool(user.can_publish),
             "referral_link": user.referral_link,
             "is_blocked": bool(user.is_blocked),
         }
 
 
-async def require_admin(user= None):
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-
+async def require_admin(user=Depends(get_current_user)):
     if int(user["telegram_id"]) not in ADMIN_IDS:
         raise HTTPException(status_code=403, detail="Admin access required")
-
     return user
 
 
-async def require_channel_access(user= None):
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-
+async def require_channel_access(user=Depends(get_current_user)):
     channel = await settings_db.get_access_channel()
 
     if not channel:
@@ -223,14 +225,14 @@ async def require_channel_access(user= None):
 
     username = str(channel).strip()
     if username.startswith("https://t.me/"):
-        username = username.rsplit("/", 1)[-1]
+        username = username.rstrip("/").rsplit("/", 1)[-1]
     username = username.lstrip("@")
 
     if not BOT_TOKEN:
         raise HTTPException(status_code=503, detail="Bot is not configured")
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=12) as client:
             response = await client.get(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember",
                 params={
@@ -238,20 +240,19 @@ async def require_channel_access(user= None):
                     "user_id": int(user["telegram_id"]),
                 },
             )
-            result = response.json()
+            response.raise_for_status()
+            data = response.json()
 
-        if not result.get("ok"):
+        if not data.get("ok"):
+            logger.warning("getChatMember failed: %s", data)
             raise HTTPException(
                 status_code=503,
                 detail="Unable to verify channel membership",
             )
 
-        status = result["result"].get("status")
+        status = data["result"].get("status")
         if status not in ("creator", "administrator", "member"):
-            raise HTTPException(
-                status_code=403,
-                detail="JOIN_REQUIRED",
-            )
+            raise HTTPException(status_code=403, detail="JOIN_REQUIRED")
 
         return user
 
@@ -266,24 +267,8 @@ async def require_channel_access(user= None):
 
 
 # --------------------------------------------------
-# Helpers
+# Response helpers
 # --------------------------------------------------
-
-def user_public_dict(user):
-    return {
-        "telegram_id": user.telegram_id,
-        "username": user.username,
-        "first_name": user.first_name,
-        "referral_count": user.referral_count or 0,
-        "can_publish": bool(user.can_publish),
-        "is_blocked": bool(user.is_blocked),
-        "created_at": (
-            user.created_at.isoformat()
-            if getattr(user, "created_at", None)
-            else None
-        ),
-    }
-
 
 def film_public_dict(film):
     return {
@@ -307,34 +292,20 @@ def film_public_dict(film):
 
 
 def channel_public_dict(channel):
+    username = str(channel.username or "").strip()
+    url = (
+        username
+        if username.startswith("http")
+        else f"https://t.me/{username.lstrip('@')}"
+    )
     return {
         "id": channel.id,
         "title": channel.title,
-        "username": channel.username,
+        "username": username,
         "category": channel.category,
         "active": bool(channel.active),
-        "url": (
-            channel.username
-            if str(channel.username).startswith("http")
-            else f"https://t.me/{str(channel.username).lstrip('@')}"
-        ),
+        "url": url,
     }
-
-
-async def get_user_row(telegram_id: int):
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        return result.scalar_one_or_none()
-
-
-async def get_film_row(film_id: int):
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(Film).where(Film.id == film_id)
-        )
-        return result.scalar_one_or_none()
 
 
 async def get_active_channels():
@@ -348,30 +319,24 @@ async def get_active_channels():
 
 
 async def save_setting(key: str, value):
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(Setting).where(Setting.key == key)
-        )
-        setting = result.scalar_one_or_none()
-
-        if setting is None:
-            setting = Setting(key=key, value=str(value))
-            session.add(setting)
-        else:
-            setting.value = str(value)
-
-        await session.commit()
+    return await settings_db.set_setting(key, value)
 
 
 async def read_all_settings():
     async with SessionLocal() as session:
         result = await session.execute(select(Setting))
-        rows = result.scalars().all()
-        return {row.key: row.value for row in rows}
+        return {row.key: row.value for row in result.scalars().all()}
 
 
-async def check_admin(user):
-    return await require_admin(user)
+async def record_admin_action(admin_id: int, action: str, target_id=None):
+    try:
+        await admin_service.log_admin_action(
+            admin_id=admin_id,
+            action=action,
+            target_id=target_id,
+        )
+    except Exception:
+        logger.exception("Could not record admin action")
 
 
 # --------------------------------------------------
@@ -407,28 +372,25 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
             except Exception:
-                logger.exception("Error while stopping bot")
+                logger.exception("Error stopping Telegram bot")
 
         await close_db()
 
 
 app = FastAPI(
     title="ALL PRODUCTION FILMS",
-    version="1.0.0",
+    version="1.0.1",
     lifespan=lifespan,
 )
 
 
 # --------------------------------------------------
-# Pages and health check
+# Pages and health
 # --------------------------------------------------
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "project": "ALL PRODUCTION FILMS",
-    }
+    return {"status": "ok", "project": "ALL PRODUCTION FILMS"}
 
 
 @app.get("/")
@@ -446,10 +408,7 @@ async def index():
 async def admin_page():
     path = os.path.join(STATIC_DIR, "admin.html")
     if not os.path.isfile(path):
-        return JSONResponse(
-            {"error": "Admin page not found"},
-            status_code=404,
-        )
+        raise HTTPException(status_code=404, detail="Admin page not found")
     return FileResponse(path)
 
 
@@ -466,22 +425,7 @@ if os.path.isdir(STATIC_DIR):
 # --------------------------------------------------
 
 @app.get("/api/me")
-async def api_me(user= None):
-    # Authentication is resolved explicitly from the request header below.
-    raise HTTPException(status_code=401, detail="Use authenticated endpoint")
-
-
-@app.get("/api/me/profile")
-async def api_me_profile(user= None):
-    raise HTTPException(status_code=401, detail="Use /api/me")
-
-
-# Use a dependency-compatible wrapper for authenticated endpoints.
-from fastapi import Depends
-
-
-@app.get("/api/me")
-async def api_me_authenticated(user=Depends(get_current_user)):
+async def api_me(user=Depends(get_current_user)):
     await require_channel_access(user)
     return {
         **user,
@@ -501,23 +445,23 @@ async def api_referrals(user=Depends(get_current_user)):
                 Referral.inviter_id == int(user["telegram_id"])
             )
         )
-        referrals = result.scalars().all()
+        rows = result.scalars().all()
 
     return {
-        "count": len(referrals),
+        "count": len(rows),
         "referral_count": user["referral_count"],
         "target": await settings_db.get_referral_target(),
         "referral_link": user.get("referral_link"),
         "referrals": [
             {
-                "invited_id": r.invited_id,
+                "invited_id": row.invited_id,
                 "joined_at": (
-                    r.joined_at.isoformat()
-                    if getattr(r, "joined_at", None)
+                    row.joined_at.isoformat()
+                    if getattr(row, "joined_at", None)
                     else None
                 ),
             }
-            for r in referrals
+            for row in rows
         ],
     }
 
@@ -534,24 +478,24 @@ async def api_referral_leaders(user=Depends(get_current_user)):
             .order_by(User.referral_count.desc())
             .limit(50)
         )
-        users = result.scalars().all()
+        rows = result.scalars().all()
 
     return {
         "leaders": [
             {
-                "rank": index + 1,
-                "telegram_id": u.telegram_id,
-                "username": u.username,
-                "first_name": u.first_name,
-                "referral_count": u.referral_count or 0,
+                "rank": i + 1,
+                "telegram_id": row.telegram_id,
+                "username": row.username,
+                "first_name": row.first_name,
+                "referral_count": int(row.referral_count or 0),
             }
-            for index, u in enumerate(users)
+            for i, row in enumerate(rows)
         ]
     }
 
 
 # --------------------------------------------------
-# Film listing/search API
+# Film search and listing
 # --------------------------------------------------
 
 @app.get("/api/films/latest")
@@ -570,7 +514,7 @@ async def api_latest_films(
         )
         rows = result.scalars().all()
 
-    return {"films": [film_public_dict(f) for f in rows]}
+    return {"films": [film_public_dict(row) for row in rows]}
 
 
 @app.get("/api/films/search")
@@ -586,8 +530,9 @@ async def api_search_films(
     if not search_text:
         return {"films": []}
 
+    pattern = f"%{search_text}%"
+
     async with SessionLocal() as session:
-        pattern = f"%{search_text}%"
         result = await session.execute(
             select(Film)
             .where(
@@ -604,7 +549,7 @@ async def api_search_films(
         )
         rows = result.scalars().all()
 
-    return {"films": [film_public_dict(f) for f in rows]}
+    return {"films": [film_public_dict(row) for row in rows]}
 
 
 @app.get("/api/films/category/{category}")
@@ -627,7 +572,7 @@ async def api_category_films(
         )
         rows = result.scalars().all()
 
-    return {"films": [film_public_dict(f) for f in rows]}
+    return {"films": [film_public_dict(row) for row in rows]}
 
 
 @app.get("/api/films/official")
@@ -649,29 +594,7 @@ async def api_official_films(
         )
         rows = result.scalars().all()
 
-    return {"films": [film_public_dict(f) for f in rows]}
-
-
-@app.get("/api/films/{film_id}")
-async def api_film_detail(
-    film_id: int,
-    user=Depends(get_current_user),
-):
-    await require_channel_access(user)
-
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(Film).where(
-                Film.id == film_id,
-                Film.approved.is_(True),
-            )
-        )
-        film = result.scalar_one_or_none()
-
-    if not film:
-        raise HTTPException(status_code=404, detail="Film not found")
-
-    return film_public_dict(film)
+    return {"films": [film_public_dict(row) for row in rows]}
 
 
 @app.get("/api/films/{film_id}/download")
@@ -690,73 +613,25 @@ async def api_film_download(
         )
         film = result.scalar_one_or_none()
 
-    if not film:
+    if film is None:
         raise HTTPException(status_code=404, detail="Film not found")
 
-    return {
-        "url": f"https://t.me/{BOT_USERNAME}?start=film_{film.id}",
-        "telegram_url": f"https://t.me/{BOT_USERNAME}?start=film_{film.id}",
-        "film_id": film.id,
-    }
-
-
-@app.get("/api/channels")
-async def api_channels(user=Depends(get_current_user)):
-    await require_channel_access(user)
-    rows = await get_active_channels()
-    return {"channels": [channel_public_dict(c) for c in rows]}
-
-
-# --------------------------------------------------
-# Image search and poster delivery
-# --------------------------------------------------
-
-@app.post("/api/films/search-image")
-async def api_search_image(
-    image: UploadFile = File(...),
-    user=Depends(get_current_user),
-):
-    await require_channel_access(user)
-
-    content = await image.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Empty image")
-
-    if len(content) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Image too large")
-
-    try:
-        image_hash = film_service.calculate_image_hash(content)
-        if not image_hash:
-            return {"films": []}
-
-        rows = await film_service.search_by_image_hash(image_hash)
-        return {
-            "films": [
-                film_public_dict(f)
-                for f in rows
-                if getattr(f, "approved", False)
-            ]
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("Image search failed: %s", exc)
-        raise HTTPException(
-            status_code=400,
-            detail="Could not process this image",
-        )
+    link = f"https://t.me/{BOT_USERNAME}?start=film_{film.id}"
+    return {"url": link, "telegram_url": link, "film_id": film.id}
 
 
 @app.get("/api/films/{film_id}/poster")
 async def api_film_poster(film_id: int):
     async with SessionLocal() as session:
         result = await session.execute(
-            select(Film).where(Film.id == film_id)
+            select(Film).where(
+                Film.id == film_id,
+                Film.approved.is_(True),
+            )
         )
         film = result.scalar_one_or_none()
 
-    if not film or not film.poster_file_id:
+    if film is None or not film.poster_file_id:
         raise HTTPException(status_code=404, detail="Poster not found")
 
     if not BOT_TOKEN:
@@ -778,19 +653,16 @@ async def api_film_poster(film_id: int):
                 )
 
             file_path = file_data["result"]["file_path"]
-
             image_response = await client.get(
                 f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
             )
             image_response.raise_for_status()
 
-            content_type = image_response.headers.get(
-                "content-type",
-                "image/jpeg",
-            )
             return Response(
                 content=image_response.content,
-                media_type=content_type,
+                media_type=image_response.headers.get(
+                    "content-type", "image/jpeg"
+                ),
                 headers={"Cache-Control": "public, max-age=3600"},
             )
 
@@ -798,37 +670,94 @@ async def api_film_poster(film_id: int):
         raise
     except Exception as exc:
         logger.exception("Poster retrieval failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not load poster")
+
+
+@app.get("/api/films/{film_id}")
+async def api_film_detail(
+    film_id: int,
+    user=Depends(get_current_user),
+):
+    await require_channel_access(user)
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Film).where(
+                Film.id == film_id,
+                Film.approved.is_(True),
+            )
+        )
+        film = result.scalar_one_or_none()
+
+    if film is None:
+        raise HTTPException(status_code=404, detail="Film not found")
+
+    return film_public_dict(film)
+
+
+@app.get("/api/channels")
+async def api_channels(user=Depends(get_current_user)):
+    await require_channel_access(user)
+    rows = await get_active_channels()
+    return {"channels": [channel_public_dict(row) for row in rows]}
+
+
+@app.post("/api/films/search-image")
+async def api_search_image(
+    image: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    await require_channel_access(user)
+
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty image")
+    if len(content) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image too large")
+
+    try:
+        image_hash = film_service.calculate_image_hash(content)
+        if not image_hash:
+            return {"films": []}
+
+        rows = await film_service.search_by_image_hash(image_hash)
+        return {
+            "films": [
+                film_public_dict(row)
+                for row in rows
+                if row.approved
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Image search failed: %s", exc)
         raise HTTPException(
-            status_code=502,
-            detail="Could not load poster",
+            status_code=400,
+            detail="Could not process this image",
         )
 
 
 # --------------------------------------------------
-# Admin API authentication helper
+# Admin API
 # --------------------------------------------------
 
-async def admin_identity(user=Depends(get_current_user)):
-    await require_admin(user)
-    return user
-
-
 @app.get("/api/admin/stats")
-async def api_admin_stats(user=Depends(admin_identity)):
+async def api_admin_stats(user=Depends(require_admin)):
     return await admin_service.get_admin_stats()
 
 
 @app.get("/api/admin/films/pending")
-async def api_admin_pending_films(user=Depends(admin_identity)):
+async def api_admin_pending_films(user=Depends(require_admin)):
     rows = await film_service.get_pending_films()
-    return {"films": [film_public_dict(f) for f in rows]}
+    return {"films": [film_public_dict(row) for row in rows]}
 
 
 @app.put("/api/admin/films/{film_id}")
 async def api_admin_update_film(
     film_id: int,
     payload: FilmUpdate,
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
     async with SessionLocal() as session:
         result = await session.execute(
@@ -836,23 +765,27 @@ async def api_admin_update_film(
         )
         film = result.scalar_one_or_none()
 
-        if not film:
+        if film is None:
             raise HTTPException(status_code=404, detail="Film not found")
 
-        values = payload.model_dump(exclude_unset=True)
-        for key, value in values.items():
-            setattr(film, key, value)
+        for key, value in payload.model_dump(exclude_unset=True).items():
+            if value is not None:
+                setattr(film, key, value)
 
         await session.commit()
         await session.refresh(film)
+        output = film_public_dict(film)
 
-    return {"success": True, "film": film_public_dict(film)}
+    await record_admin_action(
+        user["telegram_id"], "update_film", film_id
+    )
+    return {"success": True, "film": output}
 
 
 @app.delete("/api/admin/films/{film_id}")
 async def api_admin_delete_film(
     film_id: int,
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
     async with SessionLocal() as session:
         result = await session.execute(
@@ -860,93 +793,104 @@ async def api_admin_delete_film(
         )
         film = result.scalar_one_or_none()
 
-        if not film:
+        if film is None:
             raise HTTPException(status_code=404, detail="Film not found")
 
         await session.delete(film)
         await session.commit()
 
-    try:
-        await admin_service.record_admin_action(
-            user["telegram_id"],
-            "delete_film",
-            film_id,
-        )
-    except Exception:
-        logger.exception("Could not record admin action")
-
+    await record_admin_action(
+        user["telegram_id"], "delete_film", film_id
+    )
     return {"success": True, "deleted_id": film_id}
 
 
 @app.get("/api/admin/users")
 async def api_admin_users(
     limit: int = Query(default=100, ge=1, le=500),
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
-    rows = await admin_service.get_users(limit=limit)
-    return {"users": rows}
+    return {"users": await admin_service.get_users(limit=limit)}
 
 
 @app.put("/api/admin/users/{telegram_id}")
 async def api_admin_update_user(
     telegram_id: int,
     payload: UserUpdate,
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
     changed = False
 
     if payload.blocked is not None:
-        await admin_service.set_user_blocked(
+        success = await admin_service.set_user_blocked(
+            telegram_id, payload.blocked
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="User not found")
+        await record_admin_action(
+            user["telegram_id"], "block_user" if payload.blocked else "unblock_user",
             telegram_id,
-            payload.blocked,
-            admin_id=user["telegram_id"],
         )
         changed = True
 
     if payload.can_publish is not None:
-        await admin_service.set_user_can_publish(
+        success = await admin_service.set_user_publishing(
+            telegram_id, payload.can_publish
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="User not found")
+        await record_admin_action(
+            user["telegram_id"],
+            "allow_publishing" if payload.can_publish else "disable_publishing",
             telegram_id,
-            payload.can_publish,
-            admin_id=user["telegram_id"],
         )
         changed = True
 
     if not changed:
-        raise HTTPException(status_code=400, detail="No user changes provided")
+        raise HTTPException(
+            status_code=400,
+            detail="No user changes provided",
+        )
 
     return {"success": True}
 
 
 @app.get("/api/admin/channels")
-async def api_admin_channels(user=Depends(admin_identity)):
+async def api_admin_channels(user=Depends(require_admin)):
     async with SessionLocal() as session:
         result = await session.execute(
             select(Channel).order_by(Channel.id.desc())
         )
         rows = result.scalars().all()
 
-    return {"channels": [channel_public_dict(c) for c in rows]}
+    return {"channels": [channel_public_dict(row) for row in rows]}
 
 
 @app.post("/api/admin/channels")
 async def api_admin_add_channel(
     payload: ChannelCreate,
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
     username = payload.username.strip()
     if username.startswith("https://t.me/"):
-        username = username.rsplit("/", 1)[-1]
+        username = username.rstrip("/").rsplit("/", 1)[-1]
     username = username.lstrip("@")
 
     if not username or not payload.title.strip():
-        raise HTTPException(status_code=400, detail="Title and username required")
+        raise HTTPException(
+            status_code=400,
+            detail="Title and username required",
+        )
 
     async with SessionLocal() as session:
         existing = await session.execute(
             select(Channel).where(Channel.username == username)
         )
         if existing.scalar_one_or_none():
-            raise HTTPException(status_code=409, detail="Channel already exists")
+            raise HTTPException(
+                status_code=409,
+                detail="Channel already exists",
+            )
 
         channel = Channel(
             title=payload.title.strip(),
@@ -959,18 +903,25 @@ async def api_admin_add_channel(
         try:
             await session.commit()
             await session.refresh(channel)
+            output = channel_public_dict(channel)
         except IntegrityError:
             await session.rollback()
-            raise HTTPException(status_code=409, detail="Channel already exists")
+            raise HTTPException(
+                status_code=409,
+                detail="Channel already exists",
+            )
 
-    return {"success": True, "channel": channel_public_dict(channel)}
+    await record_admin_action(
+        user["telegram_id"], "add_channel", channel.id
+    )
+    return {"success": True, "channel": output}
 
 
 @app.put("/api/admin/channels/{channel_id}")
 async def api_admin_update_channel(
     channel_id: int,
     payload: ChannelUpdate,
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
     async with SessionLocal() as session:
         result = await session.execute(
@@ -978,15 +929,14 @@ async def api_admin_update_channel(
         )
         channel = result.scalar_one_or_none()
 
-        if not channel:
+        if channel is None:
             raise HTTPException(status_code=404, detail="Channel not found")
 
         values = payload.model_dump(exclude_unset=True)
-
-        if "username" in values and values["username"] is not None:
+        if values.get("username") is not None:
             username = values["username"].strip()
             if username.startswith("https://t.me/"):
-                username = username.rsplit("/", 1)[-1]
+                username = username.rstrip("/").rsplit("/", 1)[-1]
             values["username"] = username.lstrip("@")
 
         for key, value in values.items():
@@ -996,17 +946,24 @@ async def api_admin_update_channel(
         try:
             await session.commit()
             await session.refresh(channel)
+            output = channel_public_dict(channel)
         except IntegrityError:
             await session.rollback()
-            raise HTTPException(status_code=409, detail="Channel username already exists")
+            raise HTTPException(
+                status_code=409,
+                detail="Channel username already exists",
+            )
 
-    return {"success": True, "channel": channel_public_dict(channel)}
+    await record_admin_action(
+        user["telegram_id"], "update_channel", channel_id
+    )
+    return {"success": True, "channel": output}
 
 
 @app.delete("/api/admin/channels/{channel_id}")
 async def api_admin_delete_channel(
     channel_id: int,
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
     async with SessionLocal() as session:
         result = await session.execute(
@@ -1014,21 +971,22 @@ async def api_admin_delete_channel(
         )
         channel = result.scalar_one_or_none()
 
-        if not channel:
+        if channel is None:
             raise HTTPException(status_code=404, detail="Channel not found")
 
         await session.delete(channel)
         await session.commit()
 
+    await record_admin_action(
+        user["telegram_id"], "delete_channel", channel_id
+    )
     return {"success": True, "deleted_id": channel_id}
 
 
 @app.get("/api/admin/settings")
-async def api_admin_get_settings(user=Depends(admin_identity)):
-    values = await read_all_settings()
-
+async def api_admin_get_settings(user=Depends(require_admin)):
     return {
-        "settings": values,
+        "settings": await read_all_settings(),
         "referral_target": await settings_db.get_referral_target(),
         "main_channel": await settings_db.get_main_channel(),
         "access_channel": await settings_db.get_access_channel(),
@@ -1039,15 +997,15 @@ async def api_admin_get_settings(user=Depends(admin_identity)):
 @app.put("/api/admin/settings")
 async def api_admin_update_settings(
     payload: SettingsUpdate,
-    user=Depends(admin_identity),
+    user=Depends(require_admin),
 ):
     values = payload.model_dump(exclude_unset=True)
+    nested = values.pop("settings", None)
 
-    nested_settings = values.pop("settings", None)
-    if isinstance(nested_settings, dict):
-        values.update(nested_settings)
+    if isinstance(nested, dict):
+        values.update(nested)
 
-    allowed_keys = {
+    allowed = {
         "referral_target",
         "main_channel",
         "access_channel",
@@ -1055,7 +1013,7 @@ async def api_admin_update_settings(
     }
 
     for key, value in values.items():
-        if key not in allowed_keys or value is None:
+        if key not in allowed or value is None:
             continue
 
         if key == "referral_target":
@@ -1066,32 +1024,46 @@ async def api_admin_update_settings(
                     status_code=400,
                     detail="Referral target must be a number",
                 )
-
             if value < 1:
                 raise HTTPException(
                     status_code=400,
                     detail="Referral target must be at least 1",
                 )
 
-        elif key in {"main_channel", "access_channel"}:
+        elif key in ("main_channel", "access_channel"):
             value = str(value).strip()
             if value.startswith("https://t.me/"):
-                value = value.rsplit("/", 1)[-1]
+                value = value.rstrip("/").rsplit("/", 1)[-1]
             value = value.lstrip("@")
+            if not value:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} cannot be empty",
+                )
 
         elif key == "auto_approve_films":
-            value = str(value).lower() in ("1", "true", "yes", "on")
+            value = str(value).strip().lower() in (
+                "1", "true", "yes", "on"
+            )
 
         await save_setting(key, value)
+
+    await record_admin_action(
+        user["telegram_id"], "update_settings"
+    )
 
     return {
         "success": True,
         "settings": await read_all_settings(),
+        "referral_target": await settings_db.get_referral_target(),
+        "main_channel": await settings_db.get_main_channel(),
+        "access_channel": await settings_db.get_access_channel(),
+        "auto_approve_films": await settings_db.get_auto_approve(),
     }
 
 
 # --------------------------------------------------
-# API fallback
+# Error handling
 # --------------------------------------------------
 
 @app.exception_handler(404)
