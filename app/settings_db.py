@@ -1,289 +1,179 @@
 
+import logging
+
 from sqlalchemy import select
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Channel, Setting
+from app.models import Setting, Channel
 
-
-# =========================================================
-# DEFAULT SETTINGS
-# =========================================================
+logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS = {
     "referral_target": str(settings.REFERRAL_TARGET),
-
-    "main_channel": settings.MAIN_CHANNEL,
-
-    "access_channel": settings.ACCESS_CHANNEL,
-
+    "main_channel": str(settings.MAIN_CHANNEL),
+    "access_channel": str(settings.ACCESS_CHANNEL),
     "auto_approve_films": str(
         settings.AUTO_APPROVE_FILMS
     ).lower(),
 }
 
 
-# =========================================================
-# GET SETTING
-# =========================================================
-
-async def get_setting(
-    key: str,
-    default: str | None = None,
-) -> str | None:
-
-    async with SessionLocal() as session:
-
-        result = await session.execute(
-            select(Setting).where(
-                Setting.key == key
-            )
-        )
-
-        setting = result.scalar_one_or_none()
-
-        if setting is None:
-            return default
-
-        return setting.value
-
-
-# =========================================================
-# SET SETTING
-# =========================================================
-
-async def set_setting(
-    key: str,
-    value: str,
-):
-
-    async with SessionLocal() as session:
-
-        result = await session.execute(
-            select(Setting).where(
-                Setting.key == key
-            )
-        )
-
-        setting = result.scalar_one_or_none()
-
-        if setting is None:
-
-            setting = Setting(
-                key=key,
-                value=str(value),
-            )
-
-            session.add(setting)
-
-        else:
-
-            setting.value = str(value)
-
-        await session.commit()
-
-        return setting
-
-
-# =========================================================
-# SEED DEFAULT SETTINGS
-# =========================================================
-
 async def seed_default_settings():
-
     async with SessionLocal() as session:
-
         for key, value in DEFAULT_SETTINGS.items():
-
             result = await session.execute(
                 select(Setting).where(
                     Setting.key == key
                 )
             )
-
-            existing = result.scalar_one_or_none()
-
-            if existing is None:
-
+            if result.scalar_one_or_none() is None:
                 session.add(
-                    Setting(
-                        key=key,
-                        value=value,
-                    )
+                    Setting(key=key, value=value)
                 )
 
         await session.commit()
 
 
-# =========================================================
-# REFERRAL TARGET
-# =========================================================
+async def get_setting(key: str, default=None):
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Setting).where(
+                Setting.key == key
+            )
+        )
+        item = result.scalar_one_or_none()
+
+        if item is None:
+            return default
+
+        return item.value
+
+
+async def set_setting(key: str, value) -> bool:
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Setting).where(
+                Setting.key == key
+            )
+        )
+        item = result.scalar_one_or_none()
+
+        if item is None:
+            item = Setting(
+                key=key,
+                value=str(value),
+            )
+            session.add(item)
+        else:
+            item.value = str(value)
+
+        await session.commit()
+        return True
+
 
 async def get_referral_target() -> int:
-
     value = await get_setting(
         "referral_target",
-        str(settings.REFERRAL_TARGET),
+        settings.REFERRAL_TARGET,
     )
-
     try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return max(1, int(settings.REFERRAL_TARGET))
 
-        target = int(
-            value or settings.REFERRAL_TARGET
-        )
-
-    except ValueError:
-
-        target = settings.REFERRAL_TARGET
-
-    return max(
-        target,
-        1,
-    )
-
-
-# =========================================================
-# MAIN CHANNEL
-# =========================================================
 
 async def get_main_channel() -> str:
-
-    return await get_setting(
-        "main_channel",
-        settings.MAIN_CHANNEL,
-    ) or settings.MAIN_CHANNEL
-
-
-# =========================================================
-# ACCESS CHANNEL
-# =========================================================
-
-async def get_access_channel() -> str:
-
-    return await get_setting(
-        "access_channel",
-        settings.ACCESS_CHANNEL,
-    ) or settings.ACCESS_CHANNEL
-
-
-# =========================================================
-# AUTO APPROVE
-# =========================================================
-
-async def get_auto_approve() -> bool:
-
-    value = await get_setting(
-        "auto_approve_films",
-        str(
-            settings.AUTO_APPROVE_FILMS
-        ).lower(),
+    return str(
+        await get_setting(
+            "main_channel",
+            settings.MAIN_CHANNEL,
+        )
     )
 
-    return str(value).lower() in {
-        "true",
-        "1",
-        "yes",
-        "on",
-    }
+
+async def get_access_channel() -> str:
+    return str(
+        await get_setting(
+            "access_channel",
+            settings.ACCESS_CHANNEL,
+        )
+    )
 
 
-# =========================================================
-# CHANNEL LIST
-# =========================================================
+async def get_auto_approve() -> bool:
+    value = await get_setting(
+        "auto_approve_films",
+        settings.AUTO_APPROVE_FILMS,
+    )
+    return str(value).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
 
 async def get_channels(
     category: str | None = None,
     active_only: bool = True,
 ):
-
     async with SessionLocal() as session:
-
-        query = select(Channel)
-
-        if active_only:
-
-            query = query.where(
-                Channel.active.is_(True)
-            )
+        query = select(Channel).order_by(Channel.id.desc())
 
         if category:
-
             query = query.where(
                 Channel.category == category
             )
 
-        query = query.order_by(
-            Channel.id.asc()
-        )
+        if active_only:
+            query = query.where(
+                Channel.active.is_(True)
+            )
 
-        result = await session.execute(
-            query
-        )
-
+        result = await session.execute(query)
         return result.scalars().all()
 
-
-# =========================================================
-# ADD CHANNEL
-# =========================================================
 
 async def add_channel(
     title: str,
     username: str,
     category: str = "pashto",
 ):
-
     username = username.strip()
 
-    if not username.startswith("@"):
-
+    if username and not username.startswith("@"):
         username = "@" + username
 
-    async with SessionLocal() as session:
+    if not title.strip() or not username:
+        raise ValueError(
+            "Channel title and username are required."
+        )
 
+    async with SessionLocal() as session:
         result = await session.execute(
             select(Channel).where(
                 Channel.username == username
             )
         )
-
         existing = result.scalar_one_or_none()
 
         if existing:
-
             existing.title = title.strip()
-            existing.category = category.strip()
+            existing.category = category
             existing.active = True
-
             await session.commit()
-            await session.refresh(
-                existing
-            )
-
+            await session.refresh(existing)
             return existing
 
         channel = Channel(
             title=title.strip(),
             username=username,
-            category=category.strip(),
+            category=category,
             active=True,
         )
-
-        session.add(
-            channel
-        )
-
+        session.add(channel)
         await session.commit()
-        await session.refresh(
-            channel
-        )
-
+        await session.refresh(channel)
         return channel
 
-
-# =========================================================
-# UPDATE CHANNEL
-# =========================================================
 
 async def update_channel(
     channel_id: int,
@@ -292,15 +182,12 @@ async def update_channel(
     category: str | None = None,
     active: bool | None = None,
 ):
-
     async with SessionLocal() as session:
-
         result = await session.execute(
             select(Channel).where(
-                Channel.id == channel_id
+                Channel.id == int(channel_id)
             )
         )
-
         channel = result.scalar_one_or_none()
 
         if channel is None:
@@ -310,53 +197,34 @@ async def update_channel(
             channel.title = title.strip()
 
         if username is not None:
-
             username = username.strip()
-
-            if not username.startswith("@"):
+            if username and not username.startswith("@"):
                 username = "@" + username
-
             channel.username = username
 
         if category is not None:
-            channel.category = category.strip()
+            channel.category = category
 
         if active is not None:
-            channel.active = active
+            channel.active = bool(active)
 
         await session.commit()
-        await session.refresh(
-            channel
-        )
-
+        await session.refresh(channel)
         return channel
 
 
-# =========================================================
-# DELETE CHANNEL
-# =========================================================
-
-async def delete_channel(
-    channel_id: int,
-):
-
+async def delete_channel(channel_id: int) -> bool:
     async with SessionLocal() as session:
-
         result = await session.execute(
             select(Channel).where(
-                Channel.id == channel_id
+                Channel.id == int(channel_id)
             )
         )
-
         channel = result.scalar_one_or_none()
 
         if channel is None:
             return False
 
-        await session.delete(
-            channel
-        )
-
+        await session.delete(channel)
         await session.commit()
-
         return True
